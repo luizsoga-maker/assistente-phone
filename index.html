@@ -75,9 +75,11 @@
   'use strict';
 
   // ---------- Configuração ----------
-  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', autovision:true, cooldown:120, showcam:true };
+  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', autovision:false, cooldown:120, showcam:true, v:2 };
   var cfg = Object.assign({}, DEFAULTS);
   try { Object.assign(cfg, JSON.parse(localStorage.getItem('assistente_cfg') || '{}')); } catch (e) {}
+  // v2: comentário automático passa a vir desligado
+  if (cfg.v !== 2) { cfg.autovision = false; cfg.v = 2; try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
   function saveCfg() { try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
 
   var $ = function (id) { return document.getElementById(id); };
@@ -299,15 +301,17 @@
   // ---------- Claude ----------
   var SYSTEM = 'Você é um assistente de voz que vive num iPhone na casa do usuário, com câmera e microfone. ' +
     'Suas respostas serão faladas em voz alta: responda em português do Brasil, de forma curta (1 a 3 frases), ' +
-    'natural e simpática, sem markdown, listas, emojis ou símbolos. Quando receber uma imagem, ela é o que a câmera frontal está vendo agora.';
-  var VISION_WORDS = /(vendo|ve |vê|olha|camera|câmera|enxerga|minha mao|minha mão|isso aqui|o que e isso|o que é isso|estou usando|to usando|tô usando|como estou|que cor)/i;
+    'natural e simpática, sem markdown, listas, emojis ou símbolos. Quando receber uma imagem, ela é o que a câmera frontal está vendo agora. ' +
+    'Só fale sobre a imagem ou o ambiente quando o usuário pedir algo visual; nas demais perguntas, ignore a imagem e responda apenas ao que foi perguntado.';
+  // Só envia foto quando o pedido é claramente visual (texto já sem acentos)
+  var VISION_WORDS = /\b(o que (voce |vc )?(esta |ta )?vendo|voce (esta )?(me )?vendo|o que e isso|que objeto|olh[ae] (isso|aqui|pra mim|para mim|so)|(ve|veja) (isso|aqui|pra mim|para mim|so)|na (sua|tua) frente|como (eu )?estou|que cor|descreva|descreve|camera|enxerga|quantos dedos|o que (eu )?(estou|to) (segurando|mostrando|vestindo|usando))\b/;
 
   async function ask(text, withImage, isEvent) {
     if (busy) return;
     busy = true; stopRec();
     if (!isEvent) setCaption(text, '');
     setState('thinking');
-    var useImage = withImage || VISION_WORDS.test(' ' + text + ' ');
+    var useImage = withImage || VISION_WORDS.test(norm(text));
     var content = [];
     if (useImage && el.cam.readyState >= 2) content.push({ type:'image', source:{ type:'base64', media_type:'image/jpeg', data:snapshot() } });
     content.push({ type:'text', text:text });
@@ -328,7 +332,7 @@
     }
     var silent = isEvent && (!reply || /^\.*$/.test(reply));
     if (!silent) {
-      history.push({ role:'user', content:text }, { role:'assistant', content:reply || '...' });
+      if (!isEvent) history.push({ role:'user', content:text }, { role:'assistant', content:reply || '...' });
       setCaption(isEvent ? '' : text, reply);
       await speak(reply);
     }
