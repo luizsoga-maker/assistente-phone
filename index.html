@@ -6,6 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#05070d">
+<meta name="app-version" content="v12">
 <link rel="manifest" href="manifest.json">
 <title>Assistente</title>
 <style>
@@ -24,6 +25,9 @@
   #caption .you { color:var(--muted); font-size:16px; display:block; margin-bottom:6px; }
   #log { position:fixed; top:calc(44px + env(safe-area-inset-top)); left:12px; right:64px; font:11px/1.4 ui-monospace, Menlo, monospace;
     color:#9fb0cc; white-space:pre-wrap; pointer-events:none; }
+  #update { position:fixed; left:16px; right:16px; top:calc(56px + env(safe-area-inset-top)); padding:12px; border:0; border-radius:12px;
+    background:var(--accent); color:#00121a; font-size:15px; font-weight:600; z-index:5; }
+  #update.hidden { display:none; }
   #gear { position:fixed; top:calc(10px + env(safe-area-inset-top)); right:12px; width:44px; height:44px;
     border-radius:22px; border:1px solid var(--line); background:var(--panel); color:var(--fg); font-size:20px; }
   .overlay { position:fixed; inset:0; background:rgba(5,7,13,.92); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
@@ -46,11 +50,12 @@
 <div id="status">desligado</div>
 <div id="caption"></div>
 <div id="log"></div>
+<button id="update" class="hidden">Nova versão disponível · tocar para atualizar</button>
 <button id="gear" aria-label="Configurações">⚙︎</button>
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v11</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v12</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -750,6 +755,21 @@
     }
   }
   requestAnimationFrame(draw);
+
+  // ---------- Atualização ----------
+  // O Safari e o GitHub Pages guardam a página em cache; confere se há versão nova.
+  var APP_VERSION = document.querySelector('meta[name="app-version"]').content;
+  var updateBtn = document.getElementById('update');
+  async function checkUpdate() {
+    try {
+      var r = await fetch(location.pathname + '?check=' + Date.now(), { cache:'no-store' });
+      var m = /name="app-version" content="(v\d+)"/.exec(await r.text());
+      if (m && m[1] !== APP_VERSION) { updateBtn.dataset.v = m[1]; updateBtn.classList.remove('hidden'); }
+    } catch (e) {}
+  }
+  updateBtn.addEventListener('click', function () { location.replace(location.pathname + '?v=' + (updateBtn.dataset.v || Date.now())); });
+  checkUpdate(); setInterval(checkUpdate, 10 * 60 * 1000);
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') checkUpdate(); });
 
   // ---------- Controles ----------
   // iOS só libera áudio e voz se forem iniciados diretamente dentro de um toque,
