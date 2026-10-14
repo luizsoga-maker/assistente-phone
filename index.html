@@ -50,7 +50,7 @@
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v9</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v10</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -64,6 +64,7 @@
       <option value="always">Sempre que alguém falar</option>
     </select>
     <div class="row"><input id="bargein" type="checkbox"><span>Parar de falar quando eu começar a falar</span></div>
+    <div class="row"><input id="search" type="checkbox"><span>Pesquisar na internet quando precisar</span></div>
     <div class="row"><input id="camera" type="checkbox"><span>Câmera ligada (diga "desliga a câmera" / "liga a câmera")</span></div>
     <div class="row"><input id="showcam" type="checkbox"><span>Mostrar prévia da câmera</span></div>
     <div class="row"><input id="debug" type="checkbox"><span>Diagnóstico (mostra o que ouviu e enviou)</span></div>
@@ -78,24 +79,24 @@
   'use strict';
 
   // ---------- Configuração ----------
-  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, camera:true, showcam:true, debug:false };
+  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, search:true, camera:true, showcam:true, debug:false };
   var cfg = Object.assign({}, DEFAULTS);
   try { Object.assign(cfg, JSON.parse(localStorage.getItem('assistente_cfg') || '{}')); } catch (e) {}
   function saveCfg() { try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
 
   var $ = function (id) { return document.getElementById(id); };
   var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), bargein:$('bargein'),
-    camera:$('camera'), showcam:$('showcam'), debug:$('debug'), log:$('log'), start:$('start'), close:$('close'), gear:$('gear'),
+    search:$('search'), camera:$('camera'), showcam:$('showcam'), debug:$('debug'), log:$('log'), start:$('start'), close:$('close'), gear:$('gear'),
     cam:$('cam'), testvoice:$('testvoice'), status:$('status'), caption:$('caption'), stage:$('stage') };
 
   function fillForm() {
     el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode;
-    el.bargein.checked = cfg.bargein; el.camera.checked = cfg.camera; el.showcam.checked = cfg.showcam; el.debug.checked = cfg.debug;
+    el.bargein.checked = cfg.bargein; el.search.checked = cfg.search; el.camera.checked = cfg.camera; el.showcam.checked = cfg.showcam; el.debug.checked = cfg.debug;
   }
   function readForm() {
     cfg.key = el.key.value.trim(); cfg.model = el.model.value.trim() || DEFAULTS.model;
     cfg.wake = el.wake.value.trim() || DEFAULTS.wake; cfg.mode = el.mode.value;
-    cfg.bargein = el.bargein.checked;
+    cfg.bargein = el.bargein.checked; cfg.search = el.search.checked;
     var camWas = cfg.camera; cfg.camera = el.camera.checked;
     if (running && camWas !== cfg.camera) setCamera(cfg.camera);
     cfg.showcam = el.showcam.checked; cfg.debug = el.debug.checked; saveCfg();
@@ -405,10 +406,50 @@
   }
 
   // ---------- Claude ----------
+  // Busca na web feita pela própria API (ferramenta de servidor). Haiku usa a variante básica;
+  // os modelos maiores aceitam a de filtragem dinâmica.
+  function searchTool() {
+    var t = /haiku/.test(cfg.model) ? 'web_search_20250305' : 'web_search_20260209';
+    return { type:t, name:'web_search', max_uses:3,
+      user_location:{ type:'approximate', country:'BR', timezone:'America/Sao_Paulo' } };
+  }
+
+  async function callClaude(messages) {
+    var msgs = messages.slice(), j, last = null;
+    // pause_turn: a busca ainda não terminou; reenviar com o turno parcial para continuar
+    for (var round = 0; round < 3; round++) {
+      var body = { model:cfg.model, max_tokens:cfg.search ? 600 : 160,
+        system:SYSTEM + ' Hoje é ' + new Date().toLocaleDateString('pt-BR', { weekday:'long', day:'numeric', month:'long', year:'numeric' }) + '.',
+        messages:msgs };
+      if (cfg.search) body.tools = [searchTool()];
+      var r = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST',
+        headers:{ 'content-type':'application/json', 'x-api-key':cfg.key, 'anthropic-version':'2023-06-01',
+          'anthropic-dangerous-direct-browser-access':'true' },
+        body:JSON.stringify(body)
+      });
+      j = await r.json();
+      if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+      var searched = (j.content || []).filter(function (b) { return b.type === 'server_tool_use'; });
+      searched.forEach(function (b) { log('pesquisando: ' + ((b.input && b.input.query) || '')); });
+      if (searched.length) setState('thinking', 'pesquisando');
+      if (j.stop_reason !== 'pause_turn') return j;
+      msgs = msgs.concat([{ role:'assistant', content:j.content }]);
+    }
+    return j;
+  }
+
+  // Remove o que não deve ser falado (links, markdown, marcas de citação)
+  function cleanForSpeech(t) {
+    return t.replace(/https?:\/\/\S+/g, '').replace(/[*_#`>]/g, '').replace(/\[\d+\]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
   var SYSTEM = 'Você é um assistente de voz que vive num iPhone na casa do usuário, com câmera e microfone. ' +
-    'Suas respostas serão faladas em voz alta: responda em português do Brasil, de forma curta (no máximo 2 frases), ' +
+    'Suas respostas serão faladas em voz alta: responda em português do Brasil, de forma curta (no máximo 2 frases, ou 3 quando trouxer resultado de pesquisa), ' +
     'natural e simpática, sem markdown, listas, emojis ou símbolos. Quando receber uma imagem, ela é o que a câmera frontal está vendo agora. ' +
-    'Só fale sobre a imagem ou o ambiente quando o usuário pedir algo visual; nas demais perguntas, ignore a imagem e responda apenas ao que foi perguntado.';
+    'Só fale sobre a imagem ou o ambiente quando o usuário pedir algo visual; nas demais perguntas, ignore a imagem e responda apenas ao que foi perguntado. ' +
+    'Se tiver a ferramenta de busca, use-a para notícias, clima, preços, resultados, horários e qualquer fato recente ou que você não saiba; ' +
+    'depois resuma o resultado em até 3 frases faladas, sem ler links.';
   // Só envia foto quando o pedido é claramente visual (texto já sem acentos)
   var VISION_WORDS = /\b(o que (voce |vc )?(esta |ta )?vendo|voce (esta )?(me )?vendo|o que e isso|que objeto|olh[ae] (isso|aqui|pra mim|para mim|so)|(ve|veja) (isso|aqui|pra mim|para mim|so)|na (sua|tua) frente|como (eu )?estou|que cor|descreva|descreve|camera|enxerga|quantos dedos|o que (eu )?(estou|to) (segurando|mostrando|vestindo|usando))\b/;
 
@@ -454,15 +495,8 @@
     log('enviado' + (content.length > 1 ? ' (+foto)' : '') + ': ' + text);
     var reply = '';
     try {
-      var r = await fetch('https://api.anthropic.com/v1/messages', {
-        method:'POST',
-        headers:{ 'content-type':'application/json', 'x-api-key':cfg.key, 'anthropic-version':'2023-06-01',
-          'anthropic-dangerous-direct-browser-access':'true' },
-        body:JSON.stringify({ model:cfg.model, max_tokens:160, system:SYSTEM, messages:messages })
-      });
-      var j = await r.json();
-      if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
-      reply = (j.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join(' ').trim();
+      var j = await callClaude(messages);
+      reply = cleanForSpeech((j.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join(''));
     } catch (e) {
       reply = 'Tive um problema para falar com o Claude: ' + e.message;
       log('erro: ' + e.message);
