@@ -65,6 +65,7 @@
     <input id="cooldown" type="number" min="15" step="5">
     <div class="row"><input id="showcam" type="checkbox"><span>Mostrar prévia da câmera</span></div>
     <button id="start" class="primary">Ligar</button>
+    <button id="testvoice" class="secondary">Testar voz</button>
     <button id="close" class="secondary hidden">Fechar</button>
   </div>
 </div>
@@ -82,7 +83,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), autovision:$('autovision'),
     cooldown:$('cooldown'), showcam:$('showcam'), start:$('start'), close:$('close'), gear:$('gear'),
-    cam:$('cam'), status:$('status'), caption:$('caption'), stage:$('stage') };
+    cam:$('cam'), testvoice:$('testvoice'), status:$('status'), caption:$('caption'), stage:$('stage') };
 
   function fillForm() {
     el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode;
@@ -117,17 +118,21 @@
   }
 
   // ---------- Mídia ----------
+  // No iOS o Safari silencia a fala sintetizada enquanto o getUserMedia segura o
+  // microfone; lá a câmera fica só com vídeo e o microfone fica com o reconhecimento de voz.
+  var IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var stream, audioCtx, analyser, freq;
   async function startMedia() {
-    setAudioSession('play-and-record');
+    if (!IS_IOS) setAudioSession('play-and-record');
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode:'user', width:{ ideal:640 }, height:{ ideal:480 } },
-      audio: { echoCancellation:true, noiseSuppression:true }
+      audio: IS_IOS ? false : { echoCancellation:true, noiseSuppression:true }
     });
     el.cam.srcObject = stream;
     await el.cam.play().catch(function () {});
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     await audioCtx.resume();
+    if (!stream.getAudioTracks().length) { micReleased = true; return; }
     var src = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.8;
@@ -237,12 +242,12 @@
     return new Promise(function (resolve) {
       if (!('speechSynthesis' in window)) return resolve();
       stopRec(); speaking = true; setState('speaking');
-      setAudioSession('playback');
+      if (!IS_IOS) setAudioSession('playback');
       speechSynthesis.cancel();
       var u = new SpeechSynthesisUtterance(text);
       u.lang = 'pt-BR'; u.rate = 1.05; if (voice) u.voice = voice;
       var done = false;
-      function finish() { if (done) return; done = true; speaking = false; clearTimeout(guard); setAudioSession('play-and-record'); resolve(); }
+      function finish() { if (done) return; done = true; speaking = false; clearTimeout(guard); if (!IS_IOS) setAudioSession('play-and-record'); resolve(); }
       // iOS às vezes não dispara onend
       var guard = setTimeout(finish, 4000 + text.length * 90);
       u.onboundary = function () { speakAmp = 1; };
@@ -478,6 +483,19 @@
     if (!SR) setCaption('', 'Este navegador não tem reconhecimento de voz. Use o Safari.');
     setState('idle'); startRec();
     speak('Oi! Estou ligado. Me chame dizendo ' + cfg.wake + '.').then(function () { setState('idle'); startRec(); });
+  });
+  el.testvoice.addEventListener('click', function () {
+    if (!('speechSynthesis' in window)) { alert('Este navegador não tem síntese de voz.'); return; }
+    stopRec();
+    speechSynthesis.cancel();
+    var u = new SpeechSynthesisUtterance('Teste de voz. Você está me ouvindo?');
+    u.lang = 'pt-BR'; if (voice) u.voice = voice;
+    u.onstart = function () { el.testvoice.textContent = 'Falando...'; };
+    u.onend = function () { el.testvoice.textContent = 'Testar voz'; startRec(); };
+    u.onerror = function (e) { el.testvoice.textContent = 'Erro na voz: ' + e.error; };
+    speechSynthesis.speak(u);
+    var n = speechSynthesis.getVoices().filter(function (v) { return /^pt/i.test(v.lang); }).length;
+    el.testvoice.textContent = 'Falando... (vozes pt: ' + n + ')';
   });
   el.close.addEventListener('click', function () { readForm(); el.setup.classList.add('hidden'); });
   el.gear.addEventListener('click', function () { fillForm(); el.setup.classList.remove('hidden'); });
