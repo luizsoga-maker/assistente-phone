@@ -47,7 +47,7 @@
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v6</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v7</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -261,7 +261,15 @@
     if (isEcho(text) && norm(text).indexOf(norm(cfg.wake)) === -1) return;
     if (inConversation()) return ask(text);
     var n = norm(text), w = norm(cfg.wake), idx = n.indexOf(w);
-    if (idx === -1) return;
+    if (idx === -1) {
+      // tolera transcrições comuns da palavra padrão ("a sistente", "assistant")
+      var alt = w === 'assistente' ? /\b(a ?ss?istente|assistant[e]?|sistente)\b/.exec(n) : null;
+      if (alt) { n = n.slice(0, alt.index) + w + n.slice(alt.index + alt[0].length); idx = alt.index; }
+    }
+    if (idx === -1) {
+      setCaption('ouvi: ' + text, 'Diga "' + cfg.wake + '" antes para eu responder.');
+      return;
+    }
     var rest = n.slice(idx + w.length).trim();
     if (!rest) {
       conversationUntil = Date.now() + 10000;
@@ -378,7 +386,7 @@
       busy = true; stopRec();
       var handled = await localCommand(text);
       busy = false;
-      if (handled) { conversationUntil = 0; setState('idle'); startRec(); return; }
+      if (handled) { conversationUntil = Date.now() + 15000; setState('listening'); startRec(); return; }
     }
     busy = true; stopRec();
     if (!isEvent) setCaption(text, '');
@@ -410,8 +418,8 @@
       await speak(reply);
     }
     busy = false;
-    // só continua ouvindo sem palavra de ativação se ele fez uma pergunta
-    conversationUntil = (!isEvent && /\?\s*$/.test(reply)) ? Date.now() + 10000 : 0;
+    // continua ouvindo sem palavra de ativação por 15s (o filtro de eco evita loop)
+    conversationUntil = !isEvent ? Date.now() + 15000 : 0;
     setState(inConversation() ? 'listening' : 'idle');
     startRec();
   }
@@ -558,6 +566,10 @@
     running = true; keepAwake();
     el.setup.classList.add('hidden'); el.close.classList.remove('hidden'); el.start.textContent = 'Salvar';
     setInterval(checkMotion, 400);
+    // fim da janela de conversa: volta a exigir a palavra de ativação
+    setInterval(function () {
+      if (state === 'listening' && !busy && !speaking && !inConversation()) setState('idle', 'diga "' + cfg.wake + '"');
+    }, 1000);
     if (!SR) setCaption('', 'Este navegador não tem reconhecimento de voz. Use o Safari.');
     setState('idle'); startRec();
     speak('Oi! Estou ligado. Me chame dizendo ' + cfg.wake + '.').then(function () { setState('idle'); startRec(); });
