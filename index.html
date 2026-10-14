@@ -47,7 +47,7 @@
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente</h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v4</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -105,7 +105,7 @@
   var state = 'idle', running = false, busy = false, speaking = false;
   var conversationUntil = 0;           // janela para responder sem palavra de ativação
   var history = [];                    // [{role, content}] só texto
-  var lastVision = 0, lastMotionAt = 0;
+  var lastVision = 0, lastMotionAt = 0, speechEndedAt = 0;
   var look = { x:0, y:0 }, lookTarget = { x:0, y:0 };
   var micLevel = 0, heardPulse = 0, speakAmp = 0, blink = 0, nextBlink = performance.now() + 3000;
 
@@ -209,9 +209,22 @@
 
   function inConversation() { return cfg.mode === 'always' || Date.now() < conversationUntil; }
 
+  // Ignora o que for eco da última resposta (o microfone captando a própria voz)
+  var lastReply = '';
+  function isEcho(text) {
+    if (!lastReply) return false;
+    var words = norm(text).split(' ').filter(function (w) { return w.length > 2; });
+    if (words.length < 2) return false;
+    var said = ' ' + norm(lastReply) + ' ';
+    var hits = words.filter(function (w) { return said.indexOf(' ' + w + ' ') !== -1; }).length;
+    return hits / words.length >= 0.5;
+  }
+
   function handleHeard(raw) {
     var text = raw.trim();
-    if (!text || busy) return;
+    if (!text || busy || speaking) return;
+    if (Date.now() < speechEndedAt + 1500 && isEcho(text)) return;
+    if (isEcho(text) && norm(text).indexOf(norm(cfg.wake)) === -1) return;
     if (inConversation()) return ask(text);
     var n = norm(text), w = norm(cfg.wake), idx = n.indexOf(w);
     if (idx === -1) return;
@@ -249,7 +262,9 @@
       var u = new SpeechSynthesisUtterance(text);
       u.lang = 'pt-BR'; u.rate = 1.05; if (voice) u.voice = voice;
       var done = false;
-      function finish() { if (done) return; done = true; speaking = false; clearTimeout(guard); if (!IS_IOS) setAudioSession('play-and-record'); resolve(); }
+      function finish() { if (done) return; done = true; speaking = false; clearTimeout(guard); speechEndedAt = Date.now(); if (!IS_IOS) setAudioSession('play-and-record');
+        // espera o som terminar de sair antes de voltar a ouvir
+        setTimeout(resolve, 800); }
       // iOS às vezes não dispara onend
       var guard = setTimeout(finish, 4000 + text.length * 90);
       u.onboundary = function () { speakAmp = 1; };
@@ -334,10 +349,12 @@
     if (!silent) {
       if (!isEvent) history.push({ role:'user', content:text }, { role:'assistant', content:reply || '...' });
       setCaption(isEvent ? '' : text, reply);
+      lastReply = reply;
       await speak(reply);
     }
     busy = false;
-    if (!isEvent) conversationUntil = Date.now() + 10000;
+    // só continua ouvindo sem palavra de ativação se ele fez uma pergunta
+    conversationUntil = (!isEvent && /\?\s*$/.test(reply)) ? Date.now() + 10000 : 0;
     setState(inConversation() ? 'listening' : 'idle');
     startRec();
   }
