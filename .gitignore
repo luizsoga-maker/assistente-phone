@@ -1,0 +1,4 @@
+node_modules/
+bridge/.env
+bridge/projects.json
+bridge/bridge.log

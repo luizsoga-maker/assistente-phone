@@ -23,3 +23,50 @@ Página estática que transforma um iPhone em assistente de voz e câmera usando
 ## Segurança
 
 Não há chave neste repositório. Use uma chave exclusiva com limite de gasto baixo no console da Anthropic.
+
+## Modo Mac + Claude Code (`bridge/`)
+
+Roda o assistente no navegador do Mac e deixa ele mandar tarefas para o Claude Code
+nos seus projetos ("assistente, roda os testes do chatbot-pro").
+
+### Ligar
+
+```bash
+git clone https://github.com/luizsoga-maker/assistente-phone.git
+cd assistente-phone
+./bridge/start-mac.sh
+```
+
+Na primeira vez o script instala as dependências, pede a chave da API Anthropic,
+cria `bridge/.env` (com um token aleatório) e `bridge/projects.json`, liga a ponte
+e abre `http://localhost:8787` no Safari.
+
+Para liberar outros projetos, edite `bridge/projects.json`:
+
+```json
+{
+  "chatbot-pro": "~/projetos/chatbot-pro",
+  "assistente-phone": "~/projetos/assistente-phone"
+}
+```
+
+e reinicie: `pkill -f 'node server.mjs'; ./bridge/start-mac.sh`.
+
+### Permissões
+
+| O Claude Code quer… | O que acontece |
+|---|---|
+| Ler ou editar arquivos dentro do projeto | Liberado |
+| Mexer em `.env`, chaves ou `.git` | Pede confirmação |
+| Qualquer coisa fora do projeto | Pede confirmação |
+| Rodar comandos no terminal | Pede confirmação |
+
+A confirmação aparece na tela (Permitir/Negar) e também pode ser respondida por voz
+("sim", "pode", "não"). Sem resposta em 5 minutos, é negado. "Cancela a tarefa"
+interrompe o que estiver rodando.
+
+### Segurança
+
+- A ponte só escuta em `127.0.0.1` e só aceita o Host `localhost`.
+- A chave da API fica em `bridge/.env` (fora do navegador e do git).
+- Pedidos de git push, deploy e exclusões só acontecem se você pedir explicitamente.

@@ -1,0 +1,13 @@
+{
+  "name": "assistente-bridge",
+  "private": true,
+  "type": "module",
+  "description": "Ponte entre o assistente de voz e o Claude Code no Mac",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.300"
+  }
+}

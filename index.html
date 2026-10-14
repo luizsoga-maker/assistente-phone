@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#05070d">
-<meta name="app-version" content="v12">
+<meta name="app-version" content="v13">
 <link rel="manifest" href="manifest.json">
 <title>Assistente</title>
 <style>
@@ -25,6 +25,16 @@
   #caption .you { color:var(--muted); font-size:16px; display:block; margin-bottom:6px; }
   #log { position:fixed; top:calc(44px + env(safe-area-inset-top)); left:12px; right:64px; font:11px/1.4 ui-monospace, Menlo, monospace;
     color:#9fb0cc; white-space:pre-wrap; pointer-events:none; }
+  #task { position:fixed; left:16px; right:16px; bottom:calc(120px + env(safe-area-inset-bottom)); text-align:center;
+    font-size:13px; color:#ffcf8a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+  #task.hidden, #approval.hidden { display:none; }
+  #approval { position:fixed; left:16px; right:16px; bottom:calc(16px + env(safe-area-inset-bottom)); max-width:520px; margin:0 auto;
+    background:var(--panel); border:1px solid #ffb347; border-radius:16px; padding:14px; z-index:6; }
+  #approval .what { font:13px/1.4 ui-monospace, Menlo, monospace; word-break:break-word; margin-bottom:12px; }
+  #approval .btns { display:flex; gap:10px; }
+  #approval button { flex:1; padding:12px; border-radius:10px; font-size:16px; font-weight:600; border:1px solid var(--line); }
+  #approval .no { background:transparent; color:var(--fg); }
+  #approval .yes { background:#ffb347; color:#1a0f00; border-color:#ffb347; }
   #update { position:fixed; left:16px; right:16px; top:calc(56px + env(safe-area-inset-top)); padding:12px; border:0; border-radius:12px;
     background:var(--accent); color:#00121a; font-size:15px; font-weight:600; z-index:5; }
   #update.hidden { display:none; }
@@ -50,12 +60,14 @@
 <div id="status">desligado</div>
 <div id="caption"></div>
 <div id="log"></div>
+<div id="task" class="hidden"></div>
+<div id="approval" class="hidden"><div class="what"></div><div class="btns"><button class="no">Negar</button><button class="yes">Permitir</button></div></div>
 <button id="update" class="hidden">Nova versão disponível · tocar para atualizar</button>
 <button id="gear" aria-label="Configurações">⚙︎</button>
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v12</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v13</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -324,6 +336,11 @@
     }
     // eco só logo depois dele falar; fora disso, repetir palavras da resposta é normal
     if (Date.now() < speechEndedAt + 2500 && isEcho(text)) { log('ignorado: eco'); return; }
+    if (approvalVisible) {
+      var a = norm(text);
+      if (/^(sim|pode|autorizo|ok|manda|vai|permito|aprovado|claro)\b/.test(a)) { setCaption(text, 'Ok, permitido.'); answerApproval(true); return; }
+      if (/^(nao|nega|negado|cancela|espera|nem pensar)\b/.test(a)) { setCaption(text, 'Ok, negado.'); answerApproval(false); return; }
+    }
     if (inConversation()) return ask(text);
     var n = norm(text), w = norm(cfg.wake), idx = n.indexOf(w);
     if (idx === -1) {
@@ -431,13 +448,19 @@
       var body = { model:cfg.model, max_tokens:cfg.search ? 600 : 160,
         system:SYSTEM + ' Hoje é ' + new Date().toLocaleDateString('pt-BR', { weekday:'long', day:'numeric', month:'long', year:'numeric' }) + '.',
         messages:msgs };
-      if (cfg.search) body.tools = [searchTool()];
-      var r = await fetch('https://api.anthropic.com/v1/messages', {
-        method:'POST',
-        headers:{ 'content-type':'application/json', 'x-api-key':cfg.key, 'anthropic-version':'2023-06-01',
-          'anthropic-dangerous-direct-browser-access':'true' },
-        body:JSON.stringify(body)
-      });
+      body.tools = [];
+      if (cfg.search) body.tools.push(searchTool());
+      if (BRIDGE) { body.tools.push(codeTool()); body.max_tokens = Math.max(body.max_tokens, 800); }
+      if (!body.tools.length) delete body.tools;
+      // Pela ponte do Mac a chave fica no servidor; no iPhone vai direto para a API
+      var r = BRIDGE
+        ? await fetch(BRIDGE.url + '/messages', { method:'POST',
+            headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + BRIDGE.token },
+            body:JSON.stringify(body) })
+        : await fetch('https://api.anthropic.com/v1/messages', { method:'POST',
+            headers:{ 'content-type':'application/json', 'x-api-key':cfg.key, 'anthropic-version':'2023-06-01',
+              'anthropic-dangerous-direct-browser-access':'true' },
+            body:JSON.stringify(body) });
       j = await r.json();
       if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
       var searched = (j.content || []).filter(function (b) { return b.type === 'server_tool_use'; });
@@ -475,6 +498,9 @@
     } else if (CAM_ON.test(n)) {
       if (!cfg.camera) await setCamera(true);
       reply = cfg.camera ? 'Câmera ligada.' : 'Não consegui ligar a câmera.';
+    } else if (codeTask && /\b(cancela|cancelar|para|parar|interrompe) (a |essa )?tarefa\b/.test(n)) {
+      try { await bridgeFetch('/tasks/' + codeTask.id + '/cancel', { method:'POST' }); } catch (e) {}
+      reply = 'Ok, cancelei a tarefa.';
     } else if (/\b(esquece|esqueca|nova conversa|limpa a conversa|apaga a conversa)\b/.test(n)) {
       history = []; reply = 'Ok, conversa nova.';
     } else if (!cfg.camera && VISION_WORDS.test(n)) {
@@ -507,6 +533,8 @@
     try {
       var j = await callClaude(messages);
       reply = cleanForSpeech((j.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join(''));
+      var call = (j.content || []).filter(function (b) { return b.type === 'tool_use' && b.name === 'claude_code'; })[0];
+      if (call) reply = (reply ? reply + ' ' : '') + await startCodeTask(call.input || {});
     } catch (e) {
       reply = 'Tive um problema para falar com o Claude: ' + e.message;
       log('erro: ' + e.message);
@@ -527,6 +555,108 @@
       var next = pendingText; pendingText = null;
       if (!isStop(next)) handleHeard(next);
     }
+  }
+
+
+  // ---------- Claude Code (ponte no Mac) ----------
+  // Quando a página é servida pela ponte (bridge/server.mjs), ela recebe o token
+  // numa meta tag e fala com a ponte na mesma origem.
+  var tokenMeta = document.querySelector('meta[name="bridge-token"]');
+  var BRIDGE = tokenMeta ? { url:location.origin, token:tokenMeta.content } : null;
+  var bridgeProjects = [], codeTask = null, approvalVisible = false, pollBusy = false;
+  if (BRIDGE) { el.key.style.display = 'none'; el.key.previousElementSibling.style.display = 'none'; }
+
+  async function bridgeFetch(p, opts) {
+    opts = opts || {};
+    var r = await fetch(BRIDGE.url + p, { method:opts.method || 'GET',
+      headers:{ 'authorization':'Bearer ' + BRIDGE.token, 'content-type':'application/json' },
+      body:opts.body ? JSON.stringify(opts.body) : undefined });
+    var j = await r.json().catch(function () { return {}; });
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    return j;
+  }
+  async function loadProjects() {
+    if (!BRIDGE) return;
+    try { bridgeProjects = (await bridgeFetch('/health')).projects || []; log('projetos: ' + bridgeProjects.join(', ')); }
+    catch (e) { log('ponte: ' + e.message); }
+  }
+  function codeTool() {
+    return { name:'claude_code',
+      description:'Envia uma tarefa ao Claude Code rodando no Mac do usuário, que lê e altera os projetos dele ' +
+        '(código, testes, git, arquivos). Use quando o usuário pedir algo sobre os projetos ou o código dele. ' +
+        'Projetos disponíveis: ' + bridgeProjects.join(', ') + '. Não use para perguntas gerais.',
+      input_schema:{ type:'object', additionalProperties:false, required:['project', 'task'], properties:{
+        project:bridgeProjects.length ? { type:'string', enum:bridgeProjects } : { type:'string' },
+        task:{ type:'string', description:'Instrução completa e autocontida, em português, do que o Claude Code deve fazer.' },
+        new_session:{ type:'boolean', description:'true para um assunto novo; false para continuar a última tarefa desse projeto.' }
+      } } };
+  }
+  async function startCodeTask(input) {
+    if (codeTask) return 'Já tem uma tarefa rodando no Claude Code. Espere terminar ou diga cancela a tarefa.';
+    try {
+      var t = await bridgeFetch('/tasks', { method:'POST', body:{ project:input.project, task:input.task, new_session:!!input.new_session } });
+      codeTask = { id:t.id, project:t.project, startedAt:Date.now(), approvalId:null };
+      log('tarefa (' + t.project + '): ' + t.prompt);
+      renderTask(t);
+      return 'Mandei para o Claude Code no projeto ' + t.project + '. Te aviso quando terminar.';
+    } catch (e) { return 'Não consegui falar com o Claude Code: ' + e.message; }
+  }
+
+  var taskEl = document.getElementById('task'), approvalEl = document.getElementById('approval');
+  function renderTask(t) {
+    if (!t) { taskEl.classList.add('hidden'); return; }
+    var secs = Math.round((Date.now() - codeTask.startedAt) / 1000);
+    var clock = Math.floor(secs / 60) + ':' + ('0' + secs % 60).slice(-2);
+    var last = t.log && t.log.length ? ' · ' + t.log[t.log.length - 1] : '';
+    taskEl.textContent = 'Claude Code · ' + t.project + ' · ' + (t.status === 'waiting_approval' ? 'aguardando você' : 'trabalhando') + ' ' + clock + last;
+    taskEl.classList.remove('hidden');
+  }
+  function showApproval(summary) {
+    approvalEl.querySelector('.what').textContent = 'O Claude Code quer ' + summary;
+    approvalEl.classList.remove('hidden'); approvalVisible = true;
+  }
+  function hideApproval() { approvalEl.classList.add('hidden'); approvalVisible = false; }
+  async function answerApproval(allow) {
+    if (!codeTask || !codeTask.approvalId) return;
+    hideApproval();
+    log(allow ? 'permitido' : 'negado');
+    try { await bridgeFetch('/tasks/' + codeTask.id + '/approve', { method:'POST', body:{ approvalId:codeTask.approvalId, allow:allow } }); }
+    catch (e) { log('ponte: ' + e.message); }
+  }
+  approvalEl.querySelector('.yes').addEventListener('click', function () { answerApproval(true); });
+  approvalEl.querySelector('.no').addEventListener('click', function () { answerApproval(false); });
+
+  async function announce(text) {
+    busy = true; stopRec();
+    setCaption('', text); lastReply = text;
+    await speak(text);
+    busy = false; setState(inConversation() ? 'listening' : 'idle'); startRec();
+  }
+  async function pollTask() {
+    if (!codeTask || pollBusy) return;
+    pollBusy = true;
+    try {
+      var t = await bridgeFetch('/tasks/' + codeTask.id);
+      renderTask(t);
+      if (busy || speaking) return;
+      if (t.status === 'waiting_approval' && t.approval && codeTask.approvalId !== t.approval.id) {
+        codeTask.approvalId = t.approval.id;
+        showApproval(t.approval.summary);
+        conversationUntil = Date.now() + 60000;
+        await announce('O Claude Code quer ' + t.approval.summary + '. Posso?');
+      } else if (t.status !== 'running' && t.status !== 'waiting_approval') {
+        hideApproval();
+        var msg = t.status === 'done' ? 'O Claude Code terminou. ' + (t.result || '') : 'O Claude Code parou: ' + (t.error || t.status);
+        msg = cleanForSpeech(msg);
+        if (msg.length > 600) msg = msg.slice(0, 600).replace(/\s\S*$/, '') + '...';
+        codeTask = null; renderTask(null);
+        history.push({ role:'user', content:'(resultado da tarefa do Claude Code)' }, { role:'assistant', content:msg });
+        log('tarefa: ' + t.status + (t.cost != null ? ' ($' + t.cost.toFixed(3) + ')' : ''));
+        conversationUntil = Date.now() + 15000;
+        await announce(msg);
+      }
+    } catch (e) { log('ponte: ' + e.message); }
+    finally { pollBusy = false; }
   }
 
   // ---------- Desenho ----------
@@ -787,7 +917,7 @@
 
   el.start.addEventListener('click', async function () {
     readForm();
-    if (!cfg.key) { el.key.focus(); return; }
+    if (!cfg.key && !BRIDGE) { el.key.focus(); return; }
     unlockAudio();
     if (running) { el.setup.classList.add('hidden'); return; }
     el.start.textContent = 'Ligando...';
@@ -801,6 +931,7 @@
     running = true; keepAwake();
     el.setup.classList.add('hidden'); el.close.classList.remove('hidden'); el.start.textContent = 'Salvar';
     setInterval(checkMotion, 400);
+    if (BRIDGE) { loadProjects(); setInterval(pollTask, 2500); }
     // fim da janela de conversa: volta a exigir a palavra de ativação
     setInterval(function () {
       if (state === 'listening' && !busy && !speaking && !inConversation()) setState('idle', 'diga "' + cfg.wake + '"');
