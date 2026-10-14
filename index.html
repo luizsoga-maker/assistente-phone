@@ -50,7 +50,7 @@
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v10</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v11</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -58,6 +58,11 @@
     <input id="model" type="text" autocomplete="off">
     <label for="wake">Palavra de ativação</label>
     <input id="wake" type="text" autocomplete="off">
+    <label for="theme">Visual</label>
+    <select id="theme">
+      <option value="jarvis">Jarvis (orbe e anéis)</option>
+      <option value="face">Rosto</option>
+    </select>
     <label for="mode">Quando responder</label>
     <select id="mode">
       <option value="wake">Só quando ouvir a palavra de ativação</option>
@@ -79,23 +84,23 @@
   'use strict';
 
   // ---------- Configuração ----------
-  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, search:true, camera:true, showcam:true, debug:false };
+  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', theme:'jarvis', bargein:true, search:true, camera:true, showcam:true, debug:false };
   var cfg = Object.assign({}, DEFAULTS);
   try { Object.assign(cfg, JSON.parse(localStorage.getItem('assistente_cfg') || '{}')); } catch (e) {}
   function saveCfg() { try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
 
   var $ = function (id) { return document.getElementById(id); };
-  var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), bargein:$('bargein'),
+  var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), theme:$('theme'), bargein:$('bargein'),
     search:$('search'), camera:$('camera'), showcam:$('showcam'), debug:$('debug'), log:$('log'), start:$('start'), close:$('close'), gear:$('gear'),
     cam:$('cam'), testvoice:$('testvoice'), status:$('status'), caption:$('caption'), stage:$('stage') };
 
   function fillForm() {
-    el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode;
+    el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode; el.theme.value = cfg.theme;
     el.bargein.checked = cfg.bargein; el.search.checked = cfg.search; el.camera.checked = cfg.camera; el.showcam.checked = cfg.showcam; el.debug.checked = cfg.debug;
   }
   function readForm() {
     cfg.key = el.key.value.trim(); cfg.model = el.model.value.trim() || DEFAULTS.model;
-    cfg.wake = el.wake.value.trim() || DEFAULTS.wake; cfg.mode = el.mode.value;
+    cfg.wake = el.wake.value.trim() || DEFAULTS.wake; cfg.mode = el.mode.value; cfg.theme = el.theme.value;
     cfg.bargein = el.bargein.checked; cfg.search = el.search.checked;
     var camWas = cfg.camera; cfg.camera = el.camera.checked;
     if (running && camWas !== cfg.camera) setCamera(cfg.camera);
@@ -527,6 +532,120 @@
   }
   window.addEventListener('resize', resize); resize();
 
+
+  // ---------- Visual Jarvis (HUD + orbe de partículas) ----------
+  var HUD = { idle:'#3fb8ff', listening:'#6fe3ff', thinking:'#ffb347', speaking:'#8af7ff', surprised:'#ff8f4d' };
+  function rgba(hex, a) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+  // pontos distribuídos numa esfera (espiral de Fibonacci)
+  var SPHERE = (function () {
+    var pts = [], N = 380, g = Math.PI * (3 - Math.sqrt(5));
+    for (var i = 0; i < N; i++) {
+      var y = 1 - (i / (N - 1)) * 2, r = Math.sqrt(1 - y * y), th = g * i;
+      pts.push({ x:Math.cos(th) * r, y:y, z:Math.sin(th) * r, j:Math.random() * Math.PI * 2 });
+    }
+    return pts;
+  })();
+  var hudColor = HUD.idle, energy = 0;
+
+  function drawJarvis(t, cx, cy, R, bins) {
+    var target = HUD[state] || HUD.idle;
+    hudColor = target;
+    var e = Math.max(micLevel * 1.6, speakAmp, heardPulse * 0.7, state === 'thinking' ? 0.35 + 0.15 * Math.sin(t / 180) : 0);
+    energy += (e - energy) * 0.15;
+    var c = hudColor;
+    // o orbe se inclina levemente na direção do movimento visto pela câmera
+    var ox = cx + look.x * R * 0.06, oy = cy + look.y * R * 0.06;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // halo
+    var halo = ctx.createRadialGradient(ox, oy, 0, ox, oy, R * 1.5);
+    halo.addColorStop(0, rgba(c, 0.18 + energy * 0.25)); halo.addColorStop(0.5, rgba(c, 0.05)); halo.addColorStop(1, rgba(c, 0));
+    ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(ox, oy, R * 1.5, 0, Math.PI * 2); ctx.fill();
+
+    // orbe de partículas
+    var rotY = t / 2600 * (state === 'thinking' ? 2.2 : 1), rotX = 0.35 + Math.sin(t / 4000) * 0.15;
+    var cyR = Math.cos(rotY), syR = Math.sin(rotY), cxR = Math.cos(rotX), sxR = Math.sin(rotX);
+    var base = R * 0.5 * (1 + energy * 0.22);
+    for (var i = 0; i < SPHERE.length; i++) {
+      var p = SPHERE[i];
+      var x = p.x * cyR + p.z * syR, z = -p.x * syR + p.z * cyR;
+      var y = p.y * cxR - z * sxR; z = p.y * sxR + z * cxR;
+      var wob = 1 + energy * 0.25 * Math.sin(t / 140 + p.j * 3);
+      var persp = 1 / (1.6 - z * 0.6);
+      var px = ox + x * base * wob * persp * 1.6, py = oy + y * base * wob * persp * 1.6;
+      var a = 0.15 + 0.75 * (z + 1) / 2, sz = (0.9 + (z + 1) * 1.1) * (R / 150);
+      ctx.fillStyle = rgba(c, a);
+      ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
+    }
+
+    // núcleo
+    var coreR = R * (0.12 + energy * 0.08);
+    var core = ctx.createRadialGradient(ox, oy, 0, ox, oy, coreR * 2.2);
+    core.addColorStop(0, 'rgba(255,255,255,' + (0.7 + energy * 0.3) + ')');
+    core.addColorStop(0.35, rgba(c, 0.6)); core.addColorStop(1, rgba(c, 0));
+    ctx.fillStyle = core; ctx.beginPath(); ctx.arc(ox, oy, coreR * 2.2, 0, Math.PI * 2); ctx.fill();
+
+    ctx.lineCap = 'round';
+    // anel 1: círculo fino + 3 arcos girando
+    ctx.strokeStyle = rgba(c, 0.25); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx, cy, R * 0.92, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = rgba(c, 0.8); ctx.lineWidth = Math.max(2, R * 0.018);
+    for (var k = 0; k < 3; k++) {
+      var a0 = t / 1500 + k * Math.PI * 2 / 3;
+      ctx.beginPath(); ctx.arc(cx, cy, R * 0.92, a0, a0 + 0.7 + energy * 0.5); ctx.stroke();
+    }
+    // anel 2: marcações
+    var rot2 = -t / 9000;
+    for (var m = 0; m < 72; m++) {
+      var am = rot2 + m / 72 * Math.PI * 2, long = m % 6 === 0;
+      var r1 = R * 1.04, r2 = R * (long ? 1.12 : 1.08);
+      ctx.strokeStyle = rgba(c, long ? 0.7 : 0.3); ctx.lineWidth = long ? 2 : 1;
+      ctx.beginPath(); ctx.moveTo(cx + Math.cos(am) * r1, cy + Math.sin(am) * r1);
+      ctx.lineTo(cx + Math.cos(am) * r2, cy + Math.sin(am) * r2); ctx.stroke();
+    }
+    // anel 3: segmentos tracejados (mais rápidos pensando)
+    var rot3 = t / (state === 'thinking' ? 600 : 2400);
+    ctx.lineWidth = Math.max(3, R * 0.03);
+    for (var d = 0; d < 8; d++) {
+      var ad = rot3 + d * Math.PI / 4;
+      ctx.strokeStyle = rgba(c, d % 2 ? 0.25 : 0.55);
+      ctx.beginPath(); ctx.arc(cx, cy, R * 1.22, ad, ad + Math.PI / 4 - 0.12); ctx.stroke();
+    }
+    // varredura de radar enquanto pensa
+    if (state === 'thinking') {
+      var sw = t / 500;
+      ctx.fillStyle = rgba(c, 0.12);
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R * 1.22, sw, sw + 0.5); ctx.closePath(); ctx.fill();
+    }
+    // espectro
+    var N = 96;
+    ctx.lineWidth = Math.max(2, R * 0.014);
+    for (var q = 0; q < N; q++) {
+      var bv = bins ? bins[2 + Math.floor((q < N / 2 ? q : N - 1 - q) * 1.1)] / 255
+        : Math.max(heardPulse, speakAmp * 0.8) * (0.35 + 0.65 * Math.abs(Math.sin(t / 110 + q * 1.7)));
+      var len = R * 0.02 + bv * R * 0.45;
+      var aq = q / N * Math.PI * 2 - Math.PI / 2;
+      ctx.strokeStyle = rgba(c, 0.25 + bv * 0.75);
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(aq) * R * 1.32, cy + Math.sin(aq) * R * 1.32);
+      ctx.lineTo(cx + Math.cos(aq) * (R * 1.32 + len), cy + Math.sin(aq) * (R * 1.32 + len));
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // nome
+    ctx.fillStyle = rgba(c, 0.85);
+    ctx.font = '600 ' + Math.round(R * 0.09) + 'px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'center';
+    var label = cfg.wake.toUpperCase().split('').join(String.fromCharCode(8202));
+    ctx.fillText(label, cx, cy + R * 1.95);
+  }
+
   var COLORS = { idle:'#4b6bff', listening:'#5ad1ff', thinking:'#b07bff', speaking:'#4dff9a', surprised:'#ffb84d' };
 
   function draw(t) {
@@ -545,6 +664,7 @@
     look.x += (lookTarget.x - look.x) * 0.08; look.y += (lookTarget.y - look.y) * 0.08;
 
     ctx.fillStyle = '#05070d'; ctx.fillRect(0, 0, W, H);
+    if (cfg.theme === 'jarvis') { drawJarvis(t, cx, cy, R, bins); return; }
 
     // espectro circular
     var color = COLORS[state] || COLORS.idle, N = 64;
