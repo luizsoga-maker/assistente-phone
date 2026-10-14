@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#05070d">
+<link rel="manifest" href="manifest.json">
+<title>Assistente</title>
+<style>
+  :root { --bg:#05070d; --fg:#e8ecf5; --muted:#7c869c; --panel:#111624; --line:#232b40; --accent:#5ad1ff; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow:hidden; }
+  #stage { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #cam { position:fixed; left:16px; bottom:calc(16px + env(safe-area-inset-bottom)); width:96px; height:128px;
+    object-fit:cover; border-radius:14px; border:1px solid var(--line); transform:scaleX(-1); opacity:.85; }
+  #cam.hidden { display:none; }
+  #status { position:fixed; top:calc(18px + env(safe-area-inset-top)); left:0; right:0; text-align:center;
+    font-size:14px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); pointer-events:none; }
+  #caption { position:fixed; left:16px; right:16px; bottom:calc(160px + env(safe-area-inset-bottom)); text-align:center;
+    font-size:20px; line-height:1.35; min-height:2.7em; pointer-events:none; text-wrap:balance; }
+  #caption .you { color:var(--muted); font-size:16px; display:block; margin-bottom:6px; }
+  #gear { position:fixed; top:calc(10px + env(safe-area-inset-top)); right:12px; width:44px; height:44px;
+    border-radius:22px; border:1px solid var(--line); background:var(--panel); color:var(--fg); font-size:20px; }
+  .overlay { position:fixed; inset:0; background:rgba(5,7,13,.92); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
+  .overlay.hidden, button.hidden { display:none; }
+  .card { width:100%; max-width:420px; background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:20px; max-height:90vh; overflow:auto; }
+  .card h1 { font-size:20px; margin:0 0 6px; }
+  .card p { color:var(--muted); font-size:14px; margin:0 0 16px; line-height:1.45; }
+  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 6px; }
+  input[type=text], input[type=password], input[type=number], select {
+    width:100%; padding:12px; border-radius:10px; border:1px solid var(--line); background:#0a0e18; color:var(--fg); font-size:16px; }
+  .row { display:flex; align-items:center; gap:10px; margin-top:12px; font-size:15px; }
+  .row input { width:22px; height:22px; }
+  button.primary { width:100%; margin-top:20px; padding:14px; border:0; border-radius:12px; background:var(--accent); color:#00121a; font-size:17px; font-weight:600; }
+  button.secondary { width:100%; margin-top:10px; padding:12px; border:1px solid var(--line); border-radius:12px; background:transparent; color:var(--fg); font-size:15px; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<video id="cam" playsinline muted autoplay></video>
+<div id="status">desligado</div>
+<div id="caption"></div>
+<button id="gear" aria-label="Configurações">⚙︎</button>
+
+<div id="setup" class="overlay">
+  <div class="card">
+    <h1>Assistente</h1>
+    <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
+    <label for="key">Chave da API Anthropic</label>
+    <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
+    <label for="model">Modelo</label>
+    <input id="model" type="text" autocomplete="off">
+    <label for="wake">Palavra de ativação</label>
+    <input id="wake" type="text" autocomplete="off">
+    <label for="mode">Quando responder</label>
+    <select id="mode">
+      <option value="wake">Só quando ouvir a palavra de ativação</option>
+      <option value="always">Sempre que alguém falar</option>
+    </select>
+    <div class="row"><input id="autovision" type="checkbox"><span>Comentar quando detectar movimento</span></div>
+    <label for="cooldown">Intervalo mínimo entre comentários (segundos)</label>
+    <input id="cooldown" type="number" min="15" step="5">
+    <div class="row"><input id="showcam" type="checkbox"><span>Mostrar prévia da câmera</span></div>
+    <button id="start" class="primary">Ligar</button>
+    <button id="close" class="secondary hidden">Fechar</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- Configuração ----------
+  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', autovision:true, cooldown:120, showcam:true };
+  var cfg = Object.assign({}, DEFAULTS);
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem('assistente_cfg') || '{}')); } catch (e) {}
+  function saveCfg() { try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
+
+  var $ = function (id) { return document.getElementById(id); };
+  var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), autovision:$('autovision'),
+    cooldown:$('cooldown'), showcam:$('showcam'), start:$('start'), close:$('close'), gear:$('gear'),
+    cam:$('cam'), status:$('status'), caption:$('caption'), stage:$('stage') };
+
+  function fillForm() {
+    el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode;
+    el.autovision.checked = cfg.autovision; el.cooldown.value = cfg.cooldown; el.showcam.checked = cfg.showcam;
+  }
+  function readForm() {
+    cfg.key = el.key.value.trim(); cfg.model = el.model.value.trim() || DEFAULTS.model;
+    cfg.wake = el.wake.value.trim() || DEFAULTS.wake; cfg.mode = el.mode.value;
+    cfg.autovision = el.autovision.checked; cfg.cooldown = Math.max(15, parseInt(el.cooldown.value, 10) || DEFAULTS.cooldown);
+    cfg.showcam = el.showcam.checked; saveCfg();
+    el.cam.classList.toggle('hidden', !cfg.showcam);
+  }
+  fillForm();
+
+  // ---------- Estado ----------
+  // idle | listening | thinking | speaking | surprised
+  var state = 'idle', running = false, busy = false, speaking = false;
+  var conversationUntil = 0;           // janela para responder sem palavra de ativação
+  var history = [];                    // [{role, content}] só texto
+  var lastVision = 0, lastMotionAt = 0;
+  var look = { x:0, y:0 }, lookTarget = { x:0, y:0 };
+  var micLevel = 0, speakAmp = 0, blink = 0, nextBlink = performance.now() + 3000;
+
+  function setState(s, text) {
+    state = s;
+    el.status.textContent = text || ({ idle:'aguardando', listening:'ouvindo', thinking:'pensando', speaking:'falando', surprised:'vi algo' })[s];
+  }
+  function setCaption(you, bot) {
+    el.caption.innerHTML = '';
+    if (you) { var y = document.createElement('span'); y.className = 'you'; y.textContent = you; el.caption.appendChild(y); }
+    if (bot) el.caption.appendChild(document.createTextNode(bot));
+  }
+
+  // ---------- Mídia ----------
+  var stream, audioCtx, analyser, freq;
+  async function startMedia() {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode:'user', width:{ ideal:640 }, height:{ ideal:480 } },
+      audio: { echoCancellation:true, noiseSuppression:true }
+    });
+    el.cam.srcObject = stream;
+    await el.cam.play().catch(function () {});
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    await audioCtx.resume();
+    var src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.8;
+    src.connect(analyser);
+    freq = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  var wakeLock = null;
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && running) {
+      keepAwake();
+      if (audioCtx) audioCtx.resume();
+      startRec();
+    }
+  });
+
+  // ---------- Reconhecimento de voz ----------
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var rec = null, recOn = false;
+
+  function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+  function startRec() {
+    if (!SR || recOn || busy || speaking || !running) return;
+    rec = new SR();
+    rec.lang = 'pt-BR'; rec.continuous = true; rec.interimResults = true;
+    rec.onresult = function (e) {
+      for (var i = e.resultIndex; i < e.results.length; i++) {
+        var t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) handleHeard(t);
+        else if (inConversation()) { setState('listening'); setCaption(t, ''); }
+      }
+    };
+    rec.onerror = function (e) {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        setState('idle', 'reconhecimento de voz bloqueado');
+      }
+    };
+    rec.onend = function () { recOn = false; if (running && !busy && !speaking) setTimeout(startRec, 300); };
+    try { rec.start(); recOn = true; } catch (e) { recOn = false; }
+  }
+  function stopRec() { recOn = false; if (rec) { rec.onend = null; try { rec.abort(); } catch (e) {} rec = null; } }
+
+  function inConversation() { return cfg.mode === 'always' || Date.now() < conversationUntil; }
+
+  function handleHeard(raw) {
+    var text = raw.trim();
+    if (!text || busy) return;
+    if (inConversation()) return ask(text);
+    var n = norm(text), w = norm(cfg.wake), idx = n.indexOf(w);
+    if (idx === -1) return;
+    var rest = n.slice(idx + w.length).trim();
+    if (!rest) {
+      conversationUntil = Date.now() + 10000;
+      setState('listening', 'pode falar'); setCaption('', 'Oi! Pode falar.');
+      return;
+    }
+    // Recupera o trecho original (com acentos) depois da palavra de ativação
+    var cut = text.split(/\s+/).slice(n.slice(0, idx + w.length).split(' ').length).join(' ');
+    ask(cut || rest);
+  }
+
+  // ---------- Fala ----------
+  var voice = null;
+  function pickVoice() {
+    var vs = speechSynthesis.getVoices().filter(function (v) { return /^pt(-|_)BR/i.test(v.lang); });
+    voice = vs.find(function (v) { return /luciana/i.test(v.name); }) || vs[0] || null;
+  }
+  if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
+  function speak(text) {
+    return new Promise(function (resolve) {
+      if (!('speechSynthesis' in window)) return resolve();
+      stopRec(); speaking = true; setState('speaking');
+      speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(text);
+      u.lang = 'pt-BR'; u.rate = 1.05; if (voice) u.voice = voice;
+      var done = false;
+      function finish() { if (done) return; done = true; speaking = false; clearTimeout(guard); resolve(); }
+      // iOS às vezes não dispara onend
+      var guard = setTimeout(finish, 4000 + text.length * 90);
+      u.onboundary = function () { speakAmp = 1; };
+      u.onend = finish; u.onerror = finish;
+      speechSynthesis.speak(u);
+    });
+  }
+
+  // ---------- Câmera / movimento ----------
+  var small = document.createElement('canvas'); small.width = 64; small.height = 48;
+  var sctx = small.getContext('2d', { willReadFrequently:true });
+  var prevGray = null;
+
+  function checkMotion() {
+    if (!running || el.cam.readyState < 2) return;
+    sctx.drawImage(el.cam, 0, 0, 64, 48);
+    var d = sctx.getImageData(0, 0, 64, 48).data, gray = new Uint8Array(64 * 48);
+    var count = 0, sx = 0, sy = 0;
+    for (var i = 0, p = 0; p < gray.length; i += 4, p++) {
+      gray[p] = (d[i] * 3 + d[i + 1] * 4 + d[i + 2]) >> 3;
+      if (prevGray && Math.abs(gray[p] - prevGray[p]) > 28) { count++; sx += p % 64; sy += (p / 64) | 0; }
+    }
+    prevGray = gray;
+    var level = count / gray.length;
+    if (level > 0.015 && count > 0) {
+      // espelhado: a câmera frontal é invertida em relação a quem olha
+      lookTarget.x = -((sx / count) / 64 - 0.5) * 2;
+      lookTarget.y = ((sy / count) / 48 - 0.5) * 2;
+      lastMotionAt = Date.now();
+    } else if (Date.now() - lastMotionAt > 4000) {
+      lookTarget.x = 0; lookTarget.y = 0;
+    }
+    if (cfg.autovision && level > 0.12 && !busy && !speaking && Date.now() - lastVision > cfg.cooldown * 1000) {
+      lastVision = Date.now();
+      setState('surprised');
+      setTimeout(function () {
+        ask('[evento da câmera] Detectei movimento. Olhe a imagem e faça um comentário curto e simpático sobre o que vê. Se não houver nada relevante, responda apenas: ...', true, true);
+      }, 600);
+    }
+  }
+
+  function snapshot() {
+    var w = 640, h = Math.round(w * (el.cam.videoHeight || 480) / (el.cam.videoWidth || 640));
+    var c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').drawImage(el.cam, 0, 0, w, h);
+    return c.toDataURL('image/jpeg', 0.7).split(',')[1];
+  }
+
+  // ---------- Claude ----------
+  var SYSTEM = 'Você é um assistente de voz que vive num iPhone na casa do usuário, com câmera e microfone. ' +
+    'Suas respostas serão faladas em voz alta: responda em português do Brasil, de forma curta (1 a 3 frases), ' +
+    'natural e simpática, sem markdown, listas, emojis ou símbolos. Quando receber uma imagem, ela é o que a câmera frontal está vendo agora.';
+  var VISION_WORDS = /(vendo|ve |vê|olha|camera|câmera|enxerga|minha mao|minha mão|isso aqui|o que e isso|o que é isso|estou usando|to usando|tô usando|como estou|que cor)/i;
+
+  async function ask(text, withImage, isEvent) {
+    if (busy) return;
+    busy = true; stopRec();
+    if (!isEvent) setCaption(text, '');
+    setState('thinking');
+    var useImage = withImage || VISION_WORDS.test(' ' + text + ' ');
+    var content = [];
+    if (useImage && el.cam.readyState >= 2) content.push({ type:'image', source:{ type:'base64', media_type:'image/jpeg', data:snapshot() } });
+    content.push({ type:'text', text:text });
+    var messages = history.slice(-12).concat([{ role:'user', content:content }]);
+    var reply = '';
+    try {
+      var r = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST',
+        headers:{ 'content-type':'application/json', 'x-api-key':cfg.key, 'anthropic-version':'2023-06-01',
+          'anthropic-dangerous-direct-browser-access':'true' },
+        body:JSON.stringify({ model:cfg.model, max_tokens:300, system:SYSTEM, messages:messages })
+      });
+      var j = await r.json();
+      if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+      reply = (j.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join(' ').trim();
+    } catch (e) {
+      reply = 'Tive um problema para falar com o Claude: ' + e.message;
+    }
+    var silent = isEvent && (!reply || /^\.*$/.test(reply));
+    if (!silent) {
+      history.push({ role:'user', content:text }, { role:'assistant', content:reply || '...' });
+      setCaption(isEvent ? '' : text, reply);
+      await speak(reply);
+    }
+    busy = false;
+    if (!isEvent) conversationUntil = Date.now() + 10000;
+    setState(inConversation() ? 'listening' : 'idle');
+    startRec();
+  }
+
+  // ---------- Desenho ----------
+  var ctx = el.stage.getContext('2d'), W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = window.devicePixelRatio || 1; W = window.innerWidth; H = window.innerHeight;
+    el.stage.width = W * DPR; el.stage.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize); resize();
+
+  var COLORS = { idle:'#4b6bff', listening:'#5ad1ff', thinking:'#b07bff', speaking:'#4dff9a', surprised:'#ffb84d' };
+
+  function draw(t) {
+    requestAnimationFrame(draw);
+    var cx = W / 2, cy = H * 0.42, R = Math.min(W, H) * 0.26;
+
+    // nível do microfone
+    var bins = null;
+    if (analyser) {
+      analyser.getByteFrequencyData(freq); bins = freq;
+      var sum = 0; for (var i = 2; i < 60; i++) sum += freq[i];
+      micLevel += ((sum / 58 / 255) - micLevel) * 0.3;
+    }
+    speakAmp *= 0.88;
+    if (speaking) speakAmp = Math.max(speakAmp, 0.35 + 0.35 * Math.abs(Math.sin(t / 90)));
+    look.x += (lookTarget.x - look.x) * 0.08; look.y += (lookTarget.y - look.y) * 0.08;
+
+    ctx.fillStyle = '#05070d'; ctx.fillRect(0, 0, W, H);
+
+    // espectro circular
+    var color = COLORS[state] || COLORS.idle, N = 64;
+    ctx.save(); ctx.translate(cx, cy); ctx.lineCap = 'round';
+    for (var k = 0; k < N; k++) {
+      var b = bins ? bins[2 + Math.floor((k < N / 2 ? k : N - 1 - k) * 1.6)] / 255 : 0;
+      var len = 6 + b * R * 0.7 + (state === 'thinking' ? 8 * (1 + Math.sin(t / 200 + k / 3)) : 0);
+      var a = (k / N) * Math.PI * 2 - Math.PI / 2;
+      ctx.strokeStyle = color; ctx.globalAlpha = 0.35 + b * 0.65; ctx.lineWidth = Math.max(2, R * 0.03);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * (R * 1.12), Math.sin(a) * (R * 1.12));
+      ctx.lineTo(Math.cos(a) * (R * 1.12 + len), Math.sin(a) * (R * 1.12 + len));
+      ctx.stroke();
+    }
+    ctx.restore(); ctx.globalAlpha = 1;
+
+    // brilho
+    var glow = ctx.createRadialGradient(cx, cy, R * 0.8, cx, cy, R * 1.6);
+    glow.addColorStop(0, color + '33'); glow.addColorStop(1, color + '00');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, R * 1.6, 0, Math.PI * 2); ctx.fill();
+
+    // rosto (leve balanço)
+    var bob = Math.sin(t / 900) * R * 0.02 + (state === 'speaking' ? Math.sin(t / 120) * R * 0.01 : 0);
+    var fy = cy + bob;
+    var g = ctx.createRadialGradient(cx - R * 0.3, fy - R * 0.35, R * 0.1, cx, fy, R);
+    g.addColorStop(0, '#ffe58a'); g.addColorStop(1, '#f5b81c');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, fy, R, 0, Math.PI * 2); ctx.fill();
+
+    // piscar
+    if (t > nextBlink) { blink = 1; nextBlink = t + 2500 + Math.random() * 4000; }
+    blink *= 0.82;
+    var eyeOpen = Math.max(0.08, 1 - blink * 1.2);
+    var eyeScale = state === 'surprised' ? 1.35 : state === 'listening' ? 1.12 : 1;
+    var gaze = { x: look.x, y: state === 'thinking' ? -0.8 : look.y };
+    if (state === 'thinking') gaze.x = Math.sin(t / 700) * 0.6;
+
+    [-1, 1].forEach(function (side) {
+      var ex = cx + side * R * 0.36, ey = fy - R * 0.18;
+      var ew = R * 0.15 * eyeScale, eh = R * 0.2 * eyeScale * eyeOpen;
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(ex, ey, ew, eh, 0, 0, Math.PI * 2); ctx.fill();
+      if (eyeOpen > 0.3) {
+        ctx.fillStyle = '#2b1a05';
+        ctx.beginPath();
+        ctx.ellipse(ex + gaze.x * ew * 0.45, ey + gaze.y * eh * 0.4, ew * 0.5, Math.min(eh * 0.55, ew * 0.6), 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(ex + gaze.x * ew * 0.45 - ew * 0.15, ey + gaze.y * eh * 0.4 - ew * 0.18, ew * 0.13, 0, Math.PI * 2); ctx.fill();
+      }
+    });
+
+    // bochechas
+    ctx.fillStyle = 'rgba(255,120,90,.25)';
+    [-1, 1].forEach(function (side) { ctx.beginPath(); ctx.ellipse(cx + side * R * 0.58, fy + R * 0.12, R * 0.13, R * 0.08, 0, 0, Math.PI * 2); ctx.fill(); });
+
+    // boca
+    var mx = cx, my = fy + R * 0.38;
+    ctx.fillStyle = '#5a1e0e'; ctx.strokeStyle = '#5a1e0e'; ctx.lineWidth = R * 0.05; ctx.lineCap = 'round';
+    if (state === 'speaking' || speakAmp > 0.05) {
+      var open = R * (0.04 + 0.16 * speakAmp);
+      ctx.beginPath(); ctx.ellipse(mx, my, R * 0.2, open, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ff7a7a'; ctx.beginPath(); ctx.ellipse(mx, my + open * 0.45, R * 0.11, open * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+    } else if (state === 'thinking') {
+      ctx.beginPath(); ctx.ellipse(mx + R * 0.12, my, R * 0.06, R * 0.05, 0, 0, Math.PI * 2); ctx.fill();
+    } else if (state === 'surprised') {
+      ctx.beginPath(); ctx.ellipse(mx, my, R * 0.1, R * 0.13, 0, 0, Math.PI * 2); ctx.fill();
+    } else if (state === 'listening') {
+      var o = R * (0.02 + micLevel * 0.25);
+      ctx.beginPath(); ctx.ellipse(mx, my, R * 0.16, Math.max(R * 0.025, o), 0, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(mx, my - R * 0.18, R * 0.3, Math.PI * 0.2, Math.PI * 0.8); ctx.stroke();
+    }
+
+    // pontinhos "pensando"
+    if (state === 'thinking') {
+      for (var d2 = 0; d2 < 3; d2++) {
+        var a2 = 0.3 + 0.7 * Math.max(0, Math.sin(t / 250 - d2 * 0.8));
+        ctx.globalAlpha = a2; ctx.fillStyle = COLORS.thinking;
+        ctx.beginPath(); ctx.arc(cx + R * 0.95 + d2 * R * 0.18, fy - R * 0.95 - d2 * R * 0.12, R * (0.04 + d2 * 0.02), 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+  requestAnimationFrame(draw);
+
+  // ---------- Controles ----------
+  el.start.addEventListener('click', async function () {
+    readForm();
+    if (!cfg.key) { el.key.focus(); return; }
+    if (running) { el.setup.classList.add('hidden'); return; }
+    el.start.textContent = 'Ligando...';
+    try {
+      await startMedia();
+    } catch (e) {
+      el.start.textContent = 'Ligar';
+      alert('Não consegui acessar câmera/microfone: ' + e.message);
+      return;
+    }
+    // iOS só libera a voz se a primeira fala acontecer dentro do toque
+    if ('speechSynthesis' in window) { var u = new SpeechSynthesisUtterance(' '); speechSynthesis.speak(u); }
+    running = true; keepAwake();
+    el.setup.classList.add('hidden'); el.close.classList.remove('hidden'); el.start.textContent = 'Salvar';
+    setInterval(checkMotion, 400);
+    if (!SR) setCaption('', 'Este navegador não tem reconhecimento de voz. Use o Safari.');
+    setState('idle'); startRec();
+    speak('Oi! Estou ligado. Me chame dizendo ' + cfg.wake + '.').then(function () { setState('idle'); startRec(); });
+  });
+  el.close.addEventListener('click', function () { readForm(); el.setup.classList.add('hidden'); });
+  el.gear.addEventListener('click', function () { fillForm(); el.setup.classList.remove('hidden'); });
+
+  // tocar na tela = falar sem palavra de ativação
+  el.stage.addEventListener('click', function () {
+    if (!running || busy) return;
+    if (speaking) { speechSynthesis.cancel(); return; }
+    conversationUntil = Date.now() + 10000;
+    setState('listening', 'pode falar'); setCaption('', '');
+    startRec();
+  });
+})();
+</script>
+</body>
+</html>
