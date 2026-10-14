@@ -47,7 +47,7 @@
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v4</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v5</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -60,9 +60,7 @@
       <option value="wake">Só quando ouvir a palavra de ativação</option>
       <option value="always">Sempre que alguém falar</option>
     </select>
-    <div class="row"><input id="autovision" type="checkbox"><span>Comentar quando detectar movimento</span></div>
-    <label for="cooldown">Intervalo mínimo entre comentários (segundos)</label>
-    <input id="cooldown" type="number" min="15" step="5">
+    <div class="row"><input id="bargein" type="checkbox"><span>Posso interromper falando "para" ou "chega"</span></div>
     <div class="row"><input id="showcam" type="checkbox"><span>Mostrar prévia da câmera</span></div>
     <button id="start" class="primary">Ligar</button>
     <button id="testvoice" class="secondary">Testar voz</button>
@@ -75,26 +73,24 @@
   'use strict';
 
   // ---------- Configuração ----------
-  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', autovision:false, cooldown:120, showcam:true, v:2 };
+  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, showcam:true };
   var cfg = Object.assign({}, DEFAULTS);
   try { Object.assign(cfg, JSON.parse(localStorage.getItem('assistente_cfg') || '{}')); } catch (e) {}
-  // v2: comentário automático passa a vir desligado
-  if (cfg.v !== 2) { cfg.autovision = false; cfg.v = 2; try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
   function saveCfg() { try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
 
   var $ = function (id) { return document.getElementById(id); };
-  var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), autovision:$('autovision'),
-    cooldown:$('cooldown'), showcam:$('showcam'), start:$('start'), close:$('close'), gear:$('gear'),
+  var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), bargein:$('bargein'),
+    showcam:$('showcam'), start:$('start'), close:$('close'), gear:$('gear'),
     cam:$('cam'), testvoice:$('testvoice'), status:$('status'), caption:$('caption'), stage:$('stage') };
 
   function fillForm() {
     el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode;
-    el.autovision.checked = cfg.autovision; el.cooldown.value = cfg.cooldown; el.showcam.checked = cfg.showcam;
+    el.bargein.checked = cfg.bargein; el.showcam.checked = cfg.showcam;
   }
   function readForm() {
     cfg.key = el.key.value.trim(); cfg.model = el.model.value.trim() || DEFAULTS.model;
     cfg.wake = el.wake.value.trim() || DEFAULTS.wake; cfg.mode = el.mode.value;
-    cfg.autovision = el.autovision.checked; cfg.cooldown = Math.max(15, parseInt(el.cooldown.value, 10) || DEFAULTS.cooldown);
+    cfg.bargein = el.bargein.checked;
     cfg.showcam = el.showcam.checked; saveCfg();
     el.cam.classList.toggle('hidden', !cfg.showcam);
   }
@@ -176,7 +172,8 @@
   function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
 
   function startRec() {
-    if (!SR || recOn || recBlocked || busy || speaking || !running) return;
+    if (!SR || recOn || recBlocked || !running) return;
+    if (speaking ? !cfg.bargein : busy) return;
     rec = new SR();
     rec.lang = 'pt-BR'; rec.continuous = true; rec.interimResults = true;
     var gotAudio = false;
@@ -184,6 +181,7 @@
     rec.onresult = function (e) {
       for (var i = e.resultIndex; i < e.results.length; i++) {
         var t = e.results[i][0].transcript;
+        if (speaking) { if (isStop(t)) stopSpeaking(); continue; }
         if (e.results[i].isFinal) handleHeard(t);
         else {
           if (inConversation()) setState('listening');
@@ -201,11 +199,23 @@
       recOn = false;
       // terminou sem nunca abrir o áudio: provavelmente disputa de microfone
       if (!gotAudio && !micReleased && !recBlocked) releaseMic();
-      if (running && !busy && !speaking) setTimeout(startRec, 300);
+      if (running && (speaking ? cfg.bargein : !busy)) setTimeout(startRec, 300);
     };
     try { rec.start(); recOn = true; } catch (e) { recOn = false; }
   }
   function stopRec() { recOn = false; if (rec) { rec.onend = null; try { rec.abort(); } catch (e) {} rec = null; } }
+
+  // Comando curto de parar (ex.: "para", "chega", "assistente, silêncio")
+  var STOP_RE = /(^| )(para|pare|parar|chega|silencio|cala a boca|fica quieto|quieto|stop|ja chega|ja deu|tchau)( (por favor|ai|agora|ja))?$/;
+  function isStop(t) {
+    var n = norm(t);
+    return n.split(' ').length <= 3 && STOP_RE.test(n);
+  }
+  function stopSpeaking() {
+    conversationUntil = 0;
+    speechSynthesis.cancel();
+    setCaption('', 'Ok, parei.');
+  }
 
   function inConversation() { return cfg.mode === 'always' || Date.now() < conversationUntil; }
 
@@ -256,7 +266,8 @@
   function speak(text) {
     return new Promise(function (resolve) {
       if (!('speechSynthesis' in window)) return resolve();
-      stopRec(); speaking = true; setState('speaking');
+      speaking = true; setState('speaking');
+      if (cfg.bargein) startRec(); else stopRec();
       if (!IS_IOS) setAudioSession('playback');
       speechSynthesis.cancel();
       var u = new SpeechSynthesisUtterance(text);
@@ -297,13 +308,6 @@
     } else if (Date.now() - lastMotionAt > 4000) {
       lookTarget.x = 0; lookTarget.y = 0;
     }
-    if (cfg.autovision && level > 0.12 && !busy && !speaking && Date.now() - lastVision > cfg.cooldown * 1000) {
-      lastVision = Date.now();
-      setState('surprised');
-      setTimeout(function () {
-        ask('[evento da câmera] Detectei movimento. Olhe a imagem e faça um comentário curto e simpático sobre o que vê. Se não houver nada relevante, responda apenas: ...', true, true);
-      }, 600);
-    }
   }
 
   function snapshot() {
@@ -315,7 +319,7 @@
 
   // ---------- Claude ----------
   var SYSTEM = 'Você é um assistente de voz que vive num iPhone na casa do usuário, com câmera e microfone. ' +
-    'Suas respostas serão faladas em voz alta: responda em português do Brasil, de forma curta (1 a 3 frases), ' +
+    'Suas respostas serão faladas em voz alta: responda em português do Brasil, de forma curta (no máximo 2 frases), ' +
     'natural e simpática, sem markdown, listas, emojis ou símbolos. Quando receber uma imagem, ela é o que a câmera frontal está vendo agora. ' +
     'Só fale sobre a imagem ou o ambiente quando o usuário pedir algo visual; nas demais perguntas, ignore a imagem e responda apenas ao que foi perguntado.';
   // Só envia foto quando o pedido é claramente visual (texto já sem acentos)
@@ -337,7 +341,7 @@
         method:'POST',
         headers:{ 'content-type':'application/json', 'x-api-key':cfg.key, 'anthropic-version':'2023-06-01',
           'anthropic-dangerous-direct-browser-access':'true' },
-        body:JSON.stringify({ model:cfg.model, max_tokens:300, system:SYSTEM, messages:messages })
+        body:JSON.stringify({ model:cfg.model, max_tokens:160, system:SYSTEM, messages:messages })
       });
       var j = await r.json();
       if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
