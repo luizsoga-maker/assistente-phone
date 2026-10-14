@@ -27,13 +27,27 @@ if [ ! -f projects.json ]; then
   echo "Criado bridge/projects.json (edite para liberar outros projetos)"
 fi
 
+is_bridge() { curl -s -m 2 "http://localhost:$1/" | grep -q 'name="bridge-token"'; }
+port_busy() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+
 PORT=$(grep -E '^PORT=' .env | cut -d= -f2); PORT=${PORT:-8787}
-if curl -s -o /dev/null "http://localhost:$PORT/" ; then
+# Porta ocupada por outro programa: procura uma livre e grava no .env
+if port_busy "$PORT" && ! is_bridge "$PORT"; then
+  echo "A porta $PORT está em uso por outro programa."
+  for P in $(seq 8788 8899); do
+    if ! port_busy "$P"; then PORT=$P; break; fi
+  done
+  sed -i '' '/^PORT=/d' .env
+  echo "PORT=$PORT" >> .env
+  echo "Usando a porta $PORT (gravada em bridge/.env)."
+fi
+
+if is_bridge "$PORT"; then
   echo "A ponte já está rodando."
 else
   nohup node server.mjs > bridge.log 2>&1 &
-  sleep 2
-  if ! curl -s -o /dev/null "http://localhost:$PORT/"; then
+  for _ in 1 2 3 4 5 6 7 8 9 10; do is_bridge "$PORT" && break; sleep 1; done
+  if ! is_bridge "$PORT"; then
     echo "A ponte não subiu. Veja bridge/bridge.log:"; tail -20 bridge.log; exit 1
   fi
   echo "Ponte rodando (log em bridge/bridge.log). Para parar: pkill -f 'node server.mjs'"
