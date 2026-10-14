@@ -126,7 +126,7 @@
     });
     el.cam.srcObject = stream;
     await el.cam.play().catch(function () {});
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     await audioCtx.resume();
     var src = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
@@ -446,9 +446,23 @@
   requestAnimationFrame(draw);
 
   // ---------- Controles ----------
+  // iOS só libera áudio e voz se forem iniciados diretamente dentro de um toque,
+  // antes de qualquer await.
+  var speechUnlocked = false;
+  function unlockAudio() {
+    if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (audioCtx) audioCtx.resume();
+    if (!speechUnlocked && 'speechSynthesis' in window) {
+      speechUnlocked = true;
+      var u = new SpeechSynthesisUtterance('ok'); u.lang = 'pt-BR'; u.volume = 0.01;
+      speechSynthesis.speak(u);
+    }
+  }
+
   el.start.addEventListener('click', async function () {
     readForm();
     if (!cfg.key) { el.key.focus(); return; }
+    unlockAudio();
     if (running) { el.setup.classList.add('hidden'); return; }
     el.start.textContent = 'Ligando...';
     try {
@@ -458,8 +472,6 @@
       alert('Não consegui acessar câmera/microfone: ' + e.message);
       return;
     }
-    // iOS só libera a voz se a primeira fala acontecer dentro do toque
-    if ('speechSynthesis' in window) { var u = new SpeechSynthesisUtterance(' '); speechSynthesis.speak(u); }
     running = true; keepAwake();
     el.setup.classList.add('hidden'); el.close.classList.remove('hidden'); el.start.textContent = 'Salvar';
     setInterval(checkMotion, 400);
@@ -472,6 +484,7 @@
 
   // tocar na tela = falar sem palavra de ativação
   el.stage.addEventListener('click', function () {
+    unlockAudio();
     if (!running || busy) return;
     if (speaking) { speechSynthesis.cancel(); return; }
     conversationUntil = Date.now() + 10000;
