@@ -22,6 +22,8 @@
   #caption { position:fixed; left:16px; right:16px; bottom:calc(160px + env(safe-area-inset-bottom)); text-align:center;
     font-size:20px; line-height:1.35; min-height:2.7em; pointer-events:none; text-wrap:balance; }
   #caption .you { color:var(--muted); font-size:16px; display:block; margin-bottom:6px; }
+  #log { position:fixed; top:calc(44px + env(safe-area-inset-top)); left:12px; right:64px; font:11px/1.4 ui-monospace, Menlo, monospace;
+    color:#9fb0cc; white-space:pre-wrap; pointer-events:none; }
   #gear { position:fixed; top:calc(10px + env(safe-area-inset-top)); right:12px; width:44px; height:44px;
     border-radius:22px; border:1px solid var(--line); background:var(--panel); color:var(--fg); font-size:20px; }
   .overlay { position:fixed; inset:0; background:rgba(5,7,13,.92); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
@@ -43,11 +45,12 @@
 <video id="cam" playsinline muted autoplay></video>
 <div id="status">desligado</div>
 <div id="caption"></div>
+<div id="log"></div>
 <button id="gear" aria-label="Configurações">⚙︎</button>
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v8</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v9</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -63,6 +66,7 @@
     <div class="row"><input id="bargein" type="checkbox"><span>Parar de falar quando eu começar a falar</span></div>
     <div class="row"><input id="camera" type="checkbox"><span>Câmera ligada (diga "desliga a câmera" / "liga a câmera")</span></div>
     <div class="row"><input id="showcam" type="checkbox"><span>Mostrar prévia da câmera</span></div>
+    <div class="row"><input id="debug" type="checkbox"><span>Diagnóstico (mostra o que ouviu e enviou)</span></div>
     <button id="start" class="primary">Ligar</button>
     <button id="testvoice" class="secondary">Testar voz</button>
     <button id="close" class="secondary hidden">Fechar</button>
@@ -74,19 +78,19 @@
   'use strict';
 
   // ---------- Configuração ----------
-  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, camera:true, showcam:true };
+  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, camera:true, showcam:true, debug:false };
   var cfg = Object.assign({}, DEFAULTS);
   try { Object.assign(cfg, JSON.parse(localStorage.getItem('assistente_cfg') || '{}')); } catch (e) {}
   function saveCfg() { try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
 
   var $ = function (id) { return document.getElementById(id); };
   var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), bargein:$('bargein'),
-    camera:$('camera'), showcam:$('showcam'), start:$('start'), close:$('close'), gear:$('gear'),
+    camera:$('camera'), showcam:$('showcam'), debug:$('debug'), log:$('log'), start:$('start'), close:$('close'), gear:$('gear'),
     cam:$('cam'), testvoice:$('testvoice'), status:$('status'), caption:$('caption'), stage:$('stage') };
 
   function fillForm() {
     el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode;
-    el.bargein.checked = cfg.bargein; el.camera.checked = cfg.camera; el.showcam.checked = cfg.showcam;
+    el.bargein.checked = cfg.bargein; el.camera.checked = cfg.camera; el.showcam.checked = cfg.showcam; el.debug.checked = cfg.debug;
   }
   function readForm() {
     cfg.key = el.key.value.trim(); cfg.model = el.model.value.trim() || DEFAULTS.model;
@@ -94,7 +98,8 @@
     cfg.bargein = el.bargein.checked;
     var camWas = cfg.camera; cfg.camera = el.camera.checked;
     if (running && camWas !== cfg.camera) setCamera(cfg.camera);
-    cfg.showcam = el.showcam.checked; saveCfg();
+    cfg.showcam = el.showcam.checked; cfg.debug = el.debug.checked; saveCfg();
+    el.log.textContent = '';
     el.cam.classList.toggle('hidden', !cfg.showcam || !cfg.camera);
   }
   fillForm();
@@ -111,6 +116,13 @@
   function setState(s, text) {
     state = s;
     el.status.textContent = text || ({ idle:'aguardando', listening:'ouvindo', thinking:'pensando', speaking:'falando', surprised:'vi algo' })[s];
+  }
+  var logLines = [];
+  function log(msg) {
+    if (!cfg.debug) return;
+    var d = new Date(), hh = ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+    logLines.push(hh + ' ' + msg); if (logLines.length > 8) logLines.shift();
+    el.log.textContent = logLines.join('\n');
   }
   function setCaption(you, bot) {
     el.caption.innerHTML = '';
@@ -216,11 +228,7 @@
           else if (isBargeIn(t)) stopSpeaking(t);
           continue;
         }
-        if (e.results[i].isFinal) handleHeard(t);
-        else {
-          if (inConversation()) setState('listening');
-          setCaption('ouvindo: ' + t, ''); heardPulse = 1;
-        }
+        queueHeard(t, e.results[i].isFinal);
       }
     };
     rec.onerror = function (e) {
@@ -249,6 +257,7 @@
   // guarda a fala para responder em seguida.
   var pendingText = null;
   function stopSpeaking(t) {
+    log('interrompido' + (t ? ': ' + t : ''));
     speechSynthesis.cancel();
     if (t) { pendingText = t; conversationUntil = Date.now() + 15000; setState('listening'); setCaption('ouvindo: ' + t, ''); }
     else { pendingText = null; conversationUntil = 0; setCaption('', 'Ok, parei.'); }
@@ -272,6 +281,28 @@
     return hits / words.length >= 0.5;
   }
 
+  // O iPhone entrega a frase em pedaços; junta tudo e só processa após uma pausa
+  var utter = '', lastInterim = '', utterTimer = null;
+  function queueHeard(t, isFinal) {
+    if (busy) {
+      // interrompeu a fala: guarda a frase mais completa para responder em seguida
+      if (pendingText !== null && !isEcho(t) && t.length >= pendingText.length) pendingText = t.trim();
+      return;
+    }
+    if (isFinal) { utter = (utter + ' ' + t).trim(); lastInterim = ''; } else lastInterim = t.trim();
+    if (inConversation()) setState('listening');
+    setCaption('ouvindo: ' + (utter + ' ' + lastInterim).trim(), ''); heardPulse = 1;
+    clearTimeout(utterTimer);
+    utterTimer = setTimeout(flushHeard, isFinal ? 900 : 1500);
+  }
+  function flushHeard() {
+    var text = (utter + ' ' + lastInterim).trim();
+    utter = ''; lastInterim = '';
+    if (!text) return;
+    log('ouvi: ' + text);
+    handleHeard(text);
+  }
+
   function handleHeard(raw) {
     var text = raw.trim();
     if (!text || speaking) return;
@@ -280,8 +311,8 @@
       if (pendingText !== null && !isEcho(text)) pendingText = text;
       return;
     }
-    if (Date.now() < speechEndedAt + 1500 && isEcho(text)) return;
-    if (isEcho(text) && norm(text).indexOf(norm(cfg.wake)) === -1) return;
+    // eco só logo depois dele falar; fora disso, repetir palavras da resposta é normal
+    if (Date.now() < speechEndedAt + 2500 && isEcho(text)) { log('ignorado: eco'); return; }
     if (inConversation()) return ask(text);
     var n = norm(text), w = norm(cfg.wake), idx = n.indexOf(w);
     if (idx === -1) {
@@ -290,6 +321,7 @@
       if (alt) { n = n.slice(0, alt.index) + w + n.slice(alt.index + alt[0].length); idx = alt.index; }
     }
     if (idx === -1) {
+      log('ignorado: sem "' + cfg.wake + '"');
       setCaption('ouvi: ' + text, 'Diga "' + cfg.wake + '" antes para eu responder.');
       return;
     }
@@ -419,6 +451,7 @@
     if (useImage && cfg.camera && el.cam.readyState >= 2) content.push({ type:'image', source:{ type:'base64', media_type:'image/jpeg', data:snapshot() } });
     content.push({ type:'text', text:text });
     var messages = history.slice(-12).concat([{ role:'user', content:content }]);
+    log('enviado' + (content.length > 1 ? ' (+foto)' : '') + ': ' + text);
     var reply = '';
     try {
       var r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -432,12 +465,13 @@
       reply = (j.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join(' ').trim();
     } catch (e) {
       reply = 'Tive um problema para falar com o Claude: ' + e.message;
+      log('erro: ' + e.message);
     }
     var silent = isEvent && (!reply || /^\.*$/.test(reply));
     if (!silent) {
       if (!isEvent) history.push({ role:'user', content:text }, { role:'assistant', content:reply || '...' });
       setCaption(isEvent ? '' : text, reply);
-      lastReply = reply;
+      lastReply = reply; log('resposta: ' + reply);
       await speak(reply);
     }
     busy = false;
