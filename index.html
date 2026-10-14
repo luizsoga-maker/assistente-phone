@@ -119,6 +119,7 @@
   // ---------- Mídia ----------
   var stream, audioCtx, analyser, freq;
   async function startMedia() {
+    setAudioSession('play-and-record');
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode:'user', width:{ ideal:640 }, height:{ ideal:480 } },
       audio: { echoCancellation:true, noiseSuppression:true }
@@ -226,15 +227,22 @@
   }
   if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 
+  // iOS: com o microfone ativo o som sai pelo alto-falante de ligação (baixo).
+  // A Audio Session API (Safari 17+) permite pedir o alto-falante principal.
+  function setAudioSession(type) {
+    try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (e) {}
+  }
+
   function speak(text) {
     return new Promise(function (resolve) {
       if (!('speechSynthesis' in window)) return resolve();
       stopRec(); speaking = true; setState('speaking');
+      setAudioSession('playback');
       speechSynthesis.cancel();
       var u = new SpeechSynthesisUtterance(text);
       u.lang = 'pt-BR'; u.rate = 1.05; if (voice) u.voice = voice;
       var done = false;
-      function finish() { if (done) return; done = true; speaking = false; clearTimeout(guard); resolve(); }
+      function finish() { if (done) return; done = true; speaking = false; clearTimeout(guard); setAudioSession('play-and-record'); resolve(); }
       // iOS às vezes não dispara onend
       var guard = setTimeout(finish, 4000 + text.length * 90);
       u.onboundary = function () { speakAmp = 1; };
