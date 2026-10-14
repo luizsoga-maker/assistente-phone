@@ -47,7 +47,7 @@
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v5</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v6</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -61,6 +61,7 @@
       <option value="always">Sempre que alguém falar</option>
     </select>
     <div class="row"><input id="bargein" type="checkbox"><span>Posso interromper falando "para" ou "chega"</span></div>
+    <div class="row"><input id="camera" type="checkbox"><span>Câmera ligada (diga "desliga a câmera" / "liga a câmera")</span></div>
     <div class="row"><input id="showcam" type="checkbox"><span>Mostrar prévia da câmera</span></div>
     <button id="start" class="primary">Ligar</button>
     <button id="testvoice" class="secondary">Testar voz</button>
@@ -73,26 +74,28 @@
   'use strict';
 
   // ---------- Configuração ----------
-  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, showcam:true };
+  var DEFAULTS = { key:'', model:'claude-haiku-5-5', wake:'assistente', mode:'wake', bargein:true, camera:true, showcam:true };
   var cfg = Object.assign({}, DEFAULTS);
   try { Object.assign(cfg, JSON.parse(localStorage.getItem('assistente_cfg') || '{}')); } catch (e) {}
   function saveCfg() { try { localStorage.setItem('assistente_cfg', JSON.stringify(cfg)); } catch (e) {} }
 
   var $ = function (id) { return document.getElementById(id); };
   var el = { setup:$('setup'), key:$('key'), model:$('model'), wake:$('wake'), mode:$('mode'), bargein:$('bargein'),
-    showcam:$('showcam'), start:$('start'), close:$('close'), gear:$('gear'),
+    camera:$('camera'), showcam:$('showcam'), start:$('start'), close:$('close'), gear:$('gear'),
     cam:$('cam'), testvoice:$('testvoice'), status:$('status'), caption:$('caption'), stage:$('stage') };
 
   function fillForm() {
     el.key.value = cfg.key; el.model.value = cfg.model; el.wake.value = cfg.wake; el.mode.value = cfg.mode;
-    el.bargein.checked = cfg.bargein; el.showcam.checked = cfg.showcam;
+    el.bargein.checked = cfg.bargein; el.camera.checked = cfg.camera; el.showcam.checked = cfg.showcam;
   }
   function readForm() {
     cfg.key = el.key.value.trim(); cfg.model = el.model.value.trim() || DEFAULTS.model;
     cfg.wake = el.wake.value.trim() || DEFAULTS.wake; cfg.mode = el.mode.value;
     cfg.bargein = el.bargein.checked;
+    var camWas = cfg.camera; cfg.camera = el.camera.checked;
+    if (running && camWas !== cfg.camera) setCamera(cfg.camera);
     cfg.showcam = el.showcam.checked; saveCfg();
-    el.cam.classList.toggle('hidden', !cfg.showcam);
+    el.cam.classList.toggle('hidden', !cfg.showcam || !cfg.camera);
   }
   fillForm();
 
@@ -120,12 +123,33 @@
   // microfone; lá a câmera fica só com vídeo e o microfone fica com o reconhecimento de voz.
   var IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var stream, audioCtx, analyser, freq;
+  var VIDEO = { facingMode:'user', width:{ ideal:640 }, height:{ ideal:480 } };
+
+  // Liga/desliga de verdade a câmera (para a captura, apaga o indicador verde)
+  async function setCamera(on) {
+    cfg.camera = on; saveCfg();
+    stream.getVideoTracks().forEach(function (t) { t.stop(); stream.removeTrack(t); });
+    prevGray = null; lookTarget.x = 0; lookTarget.y = 0;
+    if (on) {
+      try {
+        var vs = await navigator.mediaDevices.getUserMedia({ video:VIDEO });
+        vs.getVideoTracks().forEach(function (t) { stream.addTrack(t); });
+        el.cam.srcObject = null; el.cam.srcObject = stream;
+        await el.cam.play().catch(function () {});
+      } catch (e) { cfg.camera = false; saveCfg(); }
+    }
+    el.cam.classList.toggle('hidden', !cfg.showcam || !cfg.camera);
+  }
   async function startMedia() {
     if (!IS_IOS) setAudioSession('play-and-record');
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode:'user', width:{ ideal:640 }, height:{ ideal:480 } },
-      audio: IS_IOS ? false : { echoCancellation:true, noiseSuppression:true }
-    });
+    if (cfg.camera || !IS_IOS) {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: cfg.camera ? VIDEO : false,
+        audio: IS_IOS ? false : { echoCancellation:true, noiseSuppression:true }
+      });
+    } else {
+      stream = new MediaStream();
+    }
     el.cam.srcObject = stream;
     await el.cam.play().catch(function () {});
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -290,7 +314,7 @@
   var prevGray = null;
 
   function checkMotion() {
-    if (!running || el.cam.readyState < 2) return;
+    if (!running || !cfg.camera || el.cam.readyState < 2) return;
     sctx.drawImage(el.cam, 0, 0, 64, 48);
     var d = sctx.getImageData(0, 0, 64, 48).data, gray = new Uint8Array(64 * 48);
     var count = 0, sx = 0, sy = 0;
@@ -325,14 +349,43 @@
   // Só envia foto quando o pedido é claramente visual (texto já sem acentos)
   var VISION_WORDS = /\b(o que (voce |vc )?(esta |ta )?vendo|voce (esta )?(me )?vendo|o que e isso|que objeto|olh[ae] (isso|aqui|pra mim|para mim|so)|(ve|veja) (isso|aqui|pra mim|para mim|so)|na (sua|tua) frente|como (eu )?estou|que cor|descreva|descreve|camera|enxerga|quantos dedos|o que (eu )?(estou|to) (segurando|mostrando|vestindo|usando))\b/;
 
+  var CAM_OFF = /\b(desliga|desligar|desliguei|desative|desativa|desativar|apaga|apague|fecha|feche|tira|para) (a |sua |tua )?camera\b/;
+  var CAM_ON = /\b(liga|ligar|ligue|ative|ativa|ativar|abre|abra|volta) (a |sua |tua )?camera\b/;
+
+  // Comandos resolvidos no próprio aparelho, sem chamar o Claude
+  async function localCommand(text) {
+    var n = norm(text), reply = null;
+    if (CAM_OFF.test(n)) {
+      if (cfg.camera) await setCamera(false);
+      history = []; reply = 'Pronto, câmera desligada.';
+    } else if (CAM_ON.test(n)) {
+      if (!cfg.camera) await setCamera(true);
+      reply = cfg.camera ? 'Câmera ligada.' : 'Não consegui ligar a câmera.';
+    } else if (/\b(esquece|esqueca|nova conversa|limpa a conversa|apaga a conversa)\b/.test(n)) {
+      history = []; reply = 'Ok, conversa nova.';
+    } else if (!cfg.camera && VISION_WORDS.test(n)) {
+      reply = 'Minha câmera está desligada. Diga liga a câmera.';
+    }
+    if (!reply) return false;
+    setCaption(text, reply); lastReply = reply;
+    await speak(reply);
+    return true;
+  }
+
   async function ask(text, withImage, isEvent) {
     if (busy) return;
+    if (!isEvent) {
+      busy = true; stopRec();
+      var handled = await localCommand(text);
+      busy = false;
+      if (handled) { conversationUntil = 0; setState('idle'); startRec(); return; }
+    }
     busy = true; stopRec();
     if (!isEvent) setCaption(text, '');
     setState('thinking');
     var useImage = withImage || VISION_WORDS.test(norm(text));
     var content = [];
-    if (useImage && el.cam.readyState >= 2) content.push({ type:'image', source:{ type:'base64', media_type:'image/jpeg', data:snapshot() } });
+    if (useImage && cfg.camera && el.cam.readyState >= 2) content.push({ type:'image', source:{ type:'base64', media_type:'image/jpeg', data:snapshot() } });
     content.push({ type:'text', text:text });
     var messages = history.slice(-12).concat([{ role:'user', content:content }]);
     var reply = '';
