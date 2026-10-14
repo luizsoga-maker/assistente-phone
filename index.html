@@ -47,7 +47,7 @@
 
 <div id="setup" class="overlay">
   <div class="card">
-    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v7</small></h1>
+    <h1>Assistente <small style="font-size:12px;color:var(--muted);font-weight:400">v8</small></h1>
     <p>A chave fica salva só neste aparelho. Use uma chave exclusiva com limite de gasto baixo.</p>
     <label for="key">Chave da API Anthropic</label>
     <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
@@ -60,7 +60,7 @@
       <option value="wake">Só quando ouvir a palavra de ativação</option>
       <option value="always">Sempre que alguém falar</option>
     </select>
-    <div class="row"><input id="bargein" type="checkbox"><span>Posso interromper falando "para" ou "chega"</span></div>
+    <div class="row"><input id="bargein" type="checkbox"><span>Parar de falar quando eu começar a falar</span></div>
     <div class="row"><input id="camera" type="checkbox"><span>Câmera ligada (diga "desliga a câmera" / "liga a câmera")</span></div>
     <div class="row"><input id="showcam" type="checkbox"><span>Mostrar prévia da câmera</span></div>
     <button id="start" class="primary">Ligar</button>
@@ -125,6 +125,12 @@
   var stream, audioCtx, analyser, freq;
   var VIDEO = { facingMode:'user', width:{ ideal:640 }, height:{ ideal:480 } };
 
+  // Sem await: no iOS, play() de um stream sem vídeo nunca resolve e travava o "Ligar"
+  function playCam() {
+    if (!stream || !stream.getVideoTracks().length) return;
+    var pr = el.cam.play(); if (pr && pr.catch) pr.catch(function () {});
+  }
+
   // Liga/desliga de verdade a câmera (para a captura, apaga o indicador verde)
   async function setCamera(on) {
     cfg.camera = on; saveCfg();
@@ -135,7 +141,7 @@
         var vs = await navigator.mediaDevices.getUserMedia({ video:VIDEO });
         vs.getVideoTracks().forEach(function (t) { stream.addTrack(t); });
         el.cam.srcObject = null; el.cam.srcObject = stream;
-        await el.cam.play().catch(function () {});
+        playCam();
       } catch (e) { cfg.camera = false; saveCfg(); }
     }
     el.cam.classList.toggle('hidden', !cfg.showcam || !cfg.camera);
@@ -151,7 +157,7 @@
       stream = new MediaStream();
     }
     el.cam.srcObject = stream;
-    await el.cam.play().catch(function () {});
+    playCam();
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     await audioCtx.resume();
     if (!stream.getAudioTracks().length) { micReleased = true; return; }
@@ -205,7 +211,11 @@
     rec.onresult = function (e) {
       for (var i = e.resultIndex; i < e.results.length; i++) {
         var t = e.results[i][0].transcript;
-        if (speaking) { if (isStop(t)) stopSpeaking(); continue; }
+        if (speaking) {
+          if (isStop(t)) stopSpeaking(null);
+          else if (isBargeIn(t)) stopSpeaking(t);
+          continue;
+        }
         if (e.results[i].isFinal) handleHeard(t);
         else {
           if (inConversation()) setState('listening');
@@ -235,10 +245,18 @@
     var n = norm(t);
     return n.split(' ').length <= 3 && STOP_RE.test(n);
   }
-  function stopSpeaking() {
-    conversationUntil = 0;
+  // Para de falar. Com texto: o usuário começou a falar por cima, então
+  // guarda a fala para responder em seguida.
+  var pendingText = null;
+  function stopSpeaking(t) {
     speechSynthesis.cancel();
-    setCaption('', 'Ok, parei.');
+    if (t) { pendingText = t; conversationUntil = Date.now() + 15000; setState('listening'); setCaption('ouvindo: ' + t, ''); }
+    else { pendingText = null; conversationUntil = 0; setCaption('', 'Ok, parei.'); }
+  }
+  // Voz do usuário durante a fala: 2+ palavras que não são eco do que ele está dizendo
+  function isBargeIn(t) {
+    var words = norm(t).split(' ').filter(function (w) { return w.length > 2; });
+    return words.length >= 2 && !isEcho(t);
   }
 
   function inConversation() { return cfg.mode === 'always' || Date.now() < conversationUntil; }
@@ -256,7 +274,12 @@
 
   function handleHeard(raw) {
     var text = raw.trim();
-    if (!text || busy || speaking) return;
+    if (!text || speaking) return;
+    if (busy) {
+      // terminando de responder depois de uma interrupção: guarda para logo em seguida
+      if (pendingText !== null && !isEcho(text)) pendingText = text;
+      return;
+    }
     if (Date.now() < speechEndedAt + 1500 && isEcho(text)) return;
     if (isEcho(text) && norm(text).indexOf(norm(cfg.wake)) === -1) return;
     if (inConversation()) return ask(text);
@@ -422,6 +445,10 @@
     conversationUntil = !isEvent ? Date.now() + 15000 : 0;
     setState(inConversation() ? 'listening' : 'idle');
     startRec();
+    if (pendingText) {
+      var next = pendingText; pendingText = null;
+      if (!isStop(next)) handleHeard(next);
+    }
   }
 
   // ---------- Desenho ----------
