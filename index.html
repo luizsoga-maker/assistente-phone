@@ -104,7 +104,7 @@
   var history = [];                    // [{role, content}] só texto
   var lastVision = 0, lastMotionAt = 0;
   var look = { x:0, y:0 }, lookTarget = { x:0, y:0 };
-  var micLevel = 0, speakAmp = 0, blink = 0, nextBlink = performance.now() + 3000;
+  var micLevel = 0, heardPulse = 0, speakAmp = 0, blink = 0, nextBlink = performance.now() + 3000;
 
   function setState(s, text) {
     state = s;
@@ -148,27 +148,53 @@
 
   // ---------- Reconhecimento de voz ----------
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  var rec = null, recOn = false;
+  var rec = null, recOn = false, recBlocked = false, micReleased = false;
+  var REC_ERRORS = {
+    'not-allowed':'microfone negado para reconhecimento de voz',
+    'service-not-allowed':'reconhecimento de voz desativado (ative o Ditado/Siri)',
+    'audio-capture':'microfone ocupado',
+    'network':'reconhecimento de voz sem internet'
+  };
+
+  // No iOS a câmera/microfone do getUserMedia pode disputar o microfone com o
+  // reconhecimento de voz. Se isso acontecer, solta o microfone e mantém só a câmera.
+  function releaseMic() {
+    if (micReleased || !stream) return;
+    micReleased = true;
+    stream.getAudioTracks().forEach(function (t) { t.stop(); });
+    analyser = null;
+  }
 
   function norm(s) { return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim(); }
 
   function startRec() {
-    if (!SR || recOn || busy || speaking || !running) return;
+    if (!SR || recOn || recBlocked || busy || speaking || !running) return;
     rec = new SR();
     rec.lang = 'pt-BR'; rec.continuous = true; rec.interimResults = true;
+    var gotAudio = false;
+    rec.onaudiostart = function () { gotAudio = true; if (state === 'idle') el.status.textContent = 'aguardando · microfone ativo'; };
     rec.onresult = function (e) {
       for (var i = e.resultIndex; i < e.results.length; i++) {
         var t = e.results[i][0].transcript;
         if (e.results[i].isFinal) handleHeard(t);
-        else if (inConversation()) { setState('listening'); setCaption(t, ''); }
+        else {
+          if (inConversation()) setState('listening');
+          setCaption('ouvindo: ' + t, ''); heardPulse = 1;
+        }
       }
     };
     rec.onerror = function (e) {
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        setState('idle', 'reconhecimento de voz bloqueado');
-      }
+      if (e.error === 'no-speech' || e.error === 'aborted') return;
+      if (e.error === 'audio-capture' && !micReleased) { releaseMic(); return; }
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') recBlocked = true;
+      setState('idle', REC_ERRORS[e.error] || ('erro no reconhecimento: ' + e.error));
     };
-    rec.onend = function () { recOn = false; if (running && !busy && !speaking) setTimeout(startRec, 300); };
+    rec.onend = function () {
+      recOn = false;
+      // terminou sem nunca abrir o áudio: provavelmente disputa de microfone
+      if (!gotAudio && !micReleased && !recBlocked) releaseMic();
+      if (running && !busy && !speaking) setTimeout(startRec, 300);
+    };
     try { rec.start(); recOn = true; } catch (e) { recOn = false; }
   }
   function stopRec() { recOn = false; if (rec) { rec.onend = null; try { rec.abort(); } catch (e) {} rec = null; } }
@@ -320,7 +346,7 @@
       var sum = 0; for (var i = 2; i < 60; i++) sum += freq[i];
       micLevel += ((sum / 58 / 255) - micLevel) * 0.3;
     }
-    speakAmp *= 0.88;
+    speakAmp *= 0.88; heardPulse *= 0.93; if (!analyser) micLevel = heardPulse * 0.5;
     if (speaking) speakAmp = Math.max(speakAmp, 0.35 + 0.35 * Math.abs(Math.sin(t / 90)));
     look.x += (lookTarget.x - look.x) * 0.08; look.y += (lookTarget.y - look.y) * 0.08;
 
@@ -330,7 +356,9 @@
     var color = COLORS[state] || COLORS.idle, N = 64;
     ctx.save(); ctx.translate(cx, cy); ctx.lineCap = 'round';
     for (var k = 0; k < N; k++) {
-      var b = bins ? bins[2 + Math.floor((k < N / 2 ? k : N - 1 - k) * 1.6)] / 255 : 0;
+      // sem microfone próprio (iOS), simula o espectro a partir da fala reconhecida/falada
+      var b = bins ? bins[2 + Math.floor((k < N / 2 ? k : N - 1 - k) * 1.6)] / 255
+        : Math.max(heardPulse, speakAmp * 0.8) * (0.35 + 0.65 * Math.abs(Math.sin(t / 110 + k * 1.7)));
       var len = 6 + b * R * 0.7 + (state === 'thinking' ? 8 * (1 + Math.sin(t / 200 + k / 3)) : 0);
       var a = (k / N) * Math.PI * 2 - Math.PI / 2;
       ctx.strokeStyle = color; ctx.globalAlpha = 0.35 + b * 0.65; ctx.lineWidth = Math.max(2, R * 0.03);
